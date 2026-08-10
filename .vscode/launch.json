@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:custom_shortcuts}",
+            "name": "Debug AIShortcuts",
+            "target": "AIShortcuts",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AIShortcuts"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:custom_shortcuts}",
+            "name": "Release AIShortcuts",
+            "target": "AIShortcuts",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AIShortcuts"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:custom_shortcuts}",
+            "name": "Debug AIShortcutsCoreChecks",
+            "target": "AIShortcutsCoreChecks",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AIShortcutsCoreChecks"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:custom_shortcuts}",
+            "name": "Release AIShortcutsCoreChecks",
+            "target": "AIShortcutsCoreChecks",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AIShortcutsCoreChecks"
+        }
+    ]
+}
