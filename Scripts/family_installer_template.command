@@ -79,6 +79,8 @@ if [[ -e "${APP_PATH}" ]]; then
 fi
 /usr/bin/ditto "${SOURCE_APP}" "${APP_PATH}"
 /usr/bin/xattr -dr com.apple.quarantine "${APP_PATH}" 2>/dev/null || true
+"/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" \
+    -f "${APP_PATH}"
 
 umask 077
 /usr/bin/tail -n "+$((KEY_MARKER_LINE + 1))" "${SCRIPT_PATH}" \
@@ -107,7 +109,7 @@ launchctl kickstart -k "${AGENT_TARGET}"
 
 print ""
 print "AI Shortcuts is installed and running."
-print "Look for the sparkle in the menu bar, confirm the disclosure, and grant the requested macOS permissions."
+print "Look for the sparkle in the menu bar, grant the macOS permissions, then confirm the OpenAI disclosure."
 print "If macOS blocks this installer after downloading it, right-click it and choose Open once."
 read "?Press Return to close."
 exit 0

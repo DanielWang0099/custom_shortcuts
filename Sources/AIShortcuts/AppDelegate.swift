@@ -48,6 +48,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var insertTargetApplication: NSRunningApplication?
     private var isShowingEnablementDialog = false
     private var apiKeyLoadAttempted = false
+    private var accessibilityRequestIssuedThisRun = false
+    private var screenRecordingRequestIssuedThisRun = false
     private lazy var inputLockService = InputLockService { [weak self] in
         Task { @MainActor [weak self] in
             self?.deactivateInputLock(showFeedback: true)
@@ -219,19 +221,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isShowingEnablementDialog else {
             return
         }
-        guard stateStore.permissionsRequested else {
-            requestPermissions()
-            return
+        if !stateStore.permissionsRequested {
+            stateStore.permissionsRequested = true
         }
         guard AXIsProcessTrusted() else {
-            if userInitiated {
-                requestAccessibilityPermission(openSettings: true)
+            if !accessibilityRequestIssuedThisRun || userInitiated {
+                requestAccessibilityPermission(openSettings: userInitiated)
             }
             return
         }
         guard CGPreflightScreenCaptureAccess() else {
-            if userInitiated {
-                requestScreenRecordingPermission(openSettings: true)
+            if !screenRecordingRequestIssuedThisRun || userInitiated {
+                requestScreenRecordingPermission(openSettings: userInitiated)
             }
             return
         }
@@ -243,20 +244,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func requestPermissions() {
-        stateStore.permissionsRequested = true
-        requestAccessibilityPermission(openSettings: false)
-        // macOS can suppress the second TCC prompt when Accessibility and
-        // Screen Recording are requested in the same run-loop turn.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.requestScreenRecordingPermission(openSettings: false)
-        }
-    }
-
     private func requestAccessibilityPermission(openSettings: Bool) {
         guard !AXIsProcessTrusted() else {
+            continueOnboarding()
             return
         }
+        accessibilityRequestIssuedThisRun = true
         let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
         if openSettings {
@@ -269,6 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             continueOnboarding()
             return
         }
+        screenRecordingRequestIssuedThisRun = true
         let granted = CGRequestScreenCaptureAccess()
         if openSettings {
             NSWorkspace.shared.open(AppConfiguration.screenRecordingSettingsURL)
