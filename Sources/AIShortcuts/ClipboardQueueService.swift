@@ -152,13 +152,15 @@ final class ClipboardQueueService: @unchecked Sendable {
     }
 
     private func captureWhenChanged(from baseline: Int, attempt: Int) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.018) { [weak self] in
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + ClipboardQueueCapturePolicy.retryInterval
+        ) { [weak self] in
             guard let self, mode == .collecting else {
                 return
             }
             let pasteboard = NSPasteboard.general
             guard pasteboard.changeCount != baseline else {
-                if attempt < 24 {
+                if attempt + 1 < ClipboardQueueCapturePolicy.maximumCaptureAttempts {
                     captureWhenChanged(from: baseline, attempt: attempt + 1)
                 }
                 return

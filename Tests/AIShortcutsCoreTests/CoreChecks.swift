@@ -31,6 +31,7 @@ struct CoreChecks {
         failures += await run("prompt and replacement policies", promptAndPolicyChecks)
         failures += await run("explanation conversation memory", explanationMemoryChecks)
         failures += await run("sequential clipboard FIFO", sequentialClipboardChecks)
+        failures += await run("sequential clipboard cross-window capture", sequentialClipboardCaptureChecks)
         failures += await run("Insert matching and privacy", insertMatchingChecks)
         failures += await run("daily token budget", tokenBudgetChecks)
         failures += await run("Responses request contract", requestContractCheck)
@@ -395,6 +396,14 @@ struct CoreChecks {
         try expect(
             queue.count == 1 && queue.dequeue() == "fresh",
             "A new clipboard session did not start with a fresh queue."
+        )
+    }
+
+    private static func sequentialClipboardCaptureChecks() async throws {
+        try expect(
+            ClipboardQueueCapturePolicy.maximumCaptureWait >= 2.0
+                && ClipboardQueueCapturePolicy.maximumCaptureAttempts >= 100,
+            "Clipboard capture did not allow enough time for a window switch and delayed copy."
         )
     }
 
