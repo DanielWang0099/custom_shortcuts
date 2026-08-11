@@ -32,6 +32,7 @@ struct CoreChecks {
         failures += await run("explanation conversation memory", explanationMemoryChecks)
         failures += await run("sequential clipboard FIFO", sequentialClipboardChecks)
         failures += await run("sequential clipboard cross-window capture", sequentialClipboardCaptureChecks)
+        failures += await run("sequential clipboard single press", sequentialClipboardSinglePressChecks)
         failures += await run("Insert matching and privacy", insertMatchingChecks)
         failures += await run("daily token budget", tokenBudgetChecks)
         failures += await run("Responses request contract", requestContractCheck)
@@ -405,6 +406,14 @@ struct CoreChecks {
                 && ClipboardQueueCapturePolicy.maximumCaptureAttempts >= 100,
             "Clipboard capture did not allow enough time for a window switch and delayed copy."
         )
+    }
+
+    private static func sequentialClipboardSinglePressChecks() async throws {
+        var tracker = ClipboardQueueCopyPressTracker()
+        try expect(tracker.beginKeyDown(), "The first copy key-down was not accepted.")
+        try expect(!tracker.beginKeyDown(), "A held copy key generated a duplicate capture.")
+        try expect(tracker.endKeyUp(), "The copy key-up did not finish the press.")
+        try expect(!tracker.endKeyUp(), "A repeated copy key-up generated a duplicate capture.")
     }
 
     private static func insertMatchingChecks() async throws {

@@ -25,6 +25,8 @@ final class ClipboardQueueService: @unchecked Sendable {
     private var queue = FIFOQueue<ClipboardPayload>()
     private var queuedBytes = 0
     private var copyBaselineChangeCount: Int?
+    private var copyPressTracker = ClipboardQueueCopyPressTracker()
+    private var captureGeneration = 0
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
@@ -61,6 +63,8 @@ final class ClipboardQueueService: @unchecked Sendable {
             queue.reset()
             queuedBytes = 0
             copyBaselineChangeCount = nil
+            copyPressTracker.reset()
+            captureGeneration += 1
             eventTap = tap
             runLoopSource = source
         }
@@ -91,6 +95,8 @@ final class ClipboardQueueService: @unchecked Sendable {
             queue.reset()
             queuedBytes = 0
             copyBaselineChangeCount = nil
+            copyPressTracker.reset()
+            captureGeneration += 1
             let resources = (eventTap, runLoopSource)
             eventTap = nil
             runLoopSource = nil
@@ -112,9 +118,13 @@ final class ClipboardQueueService: @unchecked Sendable {
     }
 
     private func process(type: CGEventType, event: CGEvent) {
-        if type == .tapDisabledByTimeout {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap = stateLock.withLock({ eventTap }) {
                 CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            stateLock.withLock {
+                copyPressTracker.reset()
+                copyBaselineChangeCount = nil
             }
             return
         }
@@ -130,14 +140,26 @@ final class ClipboardQueueService: @unchecked Sendable {
         if currentMode == .collecting, keyCode == 8, flags == .maskCommand {
             if type == .keyDown {
                 stateLock.withLock {
+                    guard activeMode == .collecting,
+                          copyPressTracker.beginKeyDown()
+                    else {
+                        return
+                    }
                     copyBaselineChangeCount = NSPasteboard.general.changeCount
                 }
             } else if type == .keyUp {
-                let baseline = stateLock.withLock { () -> Int in
+                let baseline = stateLock.withLock { () -> Int? in
+                    guard copyPressTracker.endKeyUp() else {
+                        return nil
+                    }
                     defer { copyBaselineChangeCount = nil }
                     return copyBaselineChangeCount ?? NSPasteboard.general.changeCount
                 }
-                captureWhenChanged(from: baseline, attempt: 0)
+                guard let baseline else {
+                    return
+                }
+                let generation = stateLock.withLock { captureGeneration }
+                captureWhenChanged(from: baseline, attempt: 0, generation: generation)
             }
             return
         }
@@ -151,17 +173,24 @@ final class ClipboardQueueService: @unchecked Sendable {
         }
     }
 
-    private func captureWhenChanged(from baseline: Int, attempt: Int) {
+    private func captureWhenChanged(from baseline: Int, attempt: Int, generation: Int) {
         DispatchQueue.main.asyncAfter(
             deadline: .now() + ClipboardQueueCapturePolicy.retryInterval
         ) { [weak self] in
-            guard let self, mode == .collecting else {
+            guard let self,
+                  self.mode == .collecting,
+                  self.stateLock.withLock({ self.captureGeneration == generation })
+            else {
                 return
             }
             let pasteboard = NSPasteboard.general
             guard pasteboard.changeCount != baseline else {
                 if attempt + 1 < ClipboardQueueCapturePolicy.maximumCaptureAttempts {
-                    captureWhenChanged(from: baseline, attempt: attempt + 1)
+                    captureWhenChanged(
+                        from: baseline,
+                        attempt: attempt + 1,
+                        generation: generation
+                    )
                 }
                 return
             }
