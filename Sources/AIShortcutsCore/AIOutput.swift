@@ -23,6 +23,8 @@ public struct AIOutputDocument: Codable, Equatable, Sendable {
             .precomposedStringWithCanonicalMapping
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{2028}", with: "\n")
+            .replacingOccurrences(of: "\u{2029}", with: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

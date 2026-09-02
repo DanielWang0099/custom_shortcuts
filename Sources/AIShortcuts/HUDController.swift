@@ -137,6 +137,9 @@ final class HUDController {
             textView.isRichText = true
             textView.importsGraphics = true
             textView.textContainerInset = NSSize(width: 2, height: 4)
+            textView.isVerticallyResizable = true
+            textView.isHorizontallyResizable = false
+            textView.autoresizingMask = [.width]
             textView.textContainer?.widthTracksTextView = true
             textView.textContainer?.containerSize = NSSize(
                 width: contentWidth - 4,
@@ -151,17 +154,9 @@ final class HUDController {
                     ]
                 )
             textView.textStorage?.setAttributedString(attributed)
-            if let layoutManager = textView.layoutManager,
-               let textContainer = textView.textContainer
-            {
-                layoutManager.ensureLayout(for: textContainer)
-            }
             let measuredHeight = max(
                 18,
-                ceil(
-                    (textView.layoutManager?.usedRect(for: textView.textContainer!).height ?? 18)
-                        + textView.textContainerInset.height * 2
-                )
+                NativeTextViewLayout.fitDocumentView(textView)
             )
             let maxBodyHeight: CGFloat = 360
             let bodyHeight = min(maxBodyHeight, max(18, measuredHeight))

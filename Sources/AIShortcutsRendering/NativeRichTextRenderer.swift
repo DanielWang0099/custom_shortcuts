@@ -272,19 +272,31 @@ private final class RichTextBuilder {
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = level <= 2 ? 10 : 7
         paragraph.lineSpacing = 2
-        appendInline(
+        let endsWithDisplayBlock = appendInline(
             text,
-            style: InlineStyle(font: font, color: theme.bodyColor, bold: true)
+            style: InlineStyle(
+                font: font,
+                color: theme.bodyColor,
+                bold: true,
+                paragraphStyle: paragraph
+            )
         )
-        appendNewline(with: paragraph)
+        if !endsWithDisplayBlock {
+            appendNewline(with: paragraph)
+        }
     }
 
     private func appendParagraph(_ text: String, style: InlineStyle) {
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 8
         paragraph.lineSpacing = 3
-        appendInline(text, style: style)
-        appendNewline(with: paragraph)
+        let endsWithDisplayBlock = appendInline(
+            text,
+            style: style.with(paragraphStyle: paragraph)
+        )
+        if !endsWithDisplayBlock {
+            appendNewline(with: paragraph)
+        }
     }
 
     private func appendBlockBreak() {
@@ -368,11 +380,17 @@ private final class RichTextBuilder {
                     ]
                 )
             )
-            appendInline(
+            let endsWithDisplayBlock = appendInline(
                 parts.text,
-                style: InlineStyle(font: theme.bodyFont, color: theme.bodyColor)
+                style: InlineStyle(
+                    font: theme.bodyFont,
+                    color: theme.bodyColor,
+                    paragraphStyle: paragraph
+                )
             )
-            appendNewline(with: paragraph)
+            if !endsWithDisplayBlock {
+                appendNewline(with: paragraph)
+            }
             if parts.marker.last == "." {
                 orderedIndex += 1
             }
@@ -407,11 +425,18 @@ private final class RichTextBuilder {
                     ]
                 )
             )
-            appendInline(
+            let endsWithDisplayBlock = appendInline(
                 String(body),
-                style: InlineStyle(font: theme.bodyFont, color: theme.secondaryColor, italic: true)
+                style: InlineStyle(
+                    font: theme.bodyFont,
+                    color: theme.secondaryColor,
+                    italic: true,
+                    paragraphStyle: paragraph
+                )
             )
-            appendNewline(with: paragraph)
+            if !endsWithDisplayBlock {
+                appendNewline(with: paragraph)
+            }
             index += 1
         }
         return index
@@ -462,26 +487,33 @@ private final class RichTextBuilder {
                 paragraph.textBlocks = [block]
                 paragraph.paragraphSpacing = 0
                 paragraph.lineSpacing = 2
-                attributedString.append(
-                    NSAttributedString(
-                        string: "\(value)\n",
-                        attributes: [
-                            .font: rowIndex == 0
-                                ? NSFont.systemFont(ofSize: theme.bodyFont.pointSize, weight: .semibold)
-                                : theme.bodyFont,
-                            .foregroundColor: theme.bodyColor,
-                            .paragraphStyle: paragraph,
-                        ]
-                    )
+                appendInline(
+                    value,
+                    style: InlineStyle(
+                        font: rowIndex == 0
+                            ? NSFont.systemFont(ofSize: theme.bodyFont.pointSize, weight: .semibold)
+                            : theme.bodyFont,
+                        color: theme.bodyColor,
+                        bold: rowIndex == 0,
+                        paragraphStyle: paragraph
+                    ),
+                    displayMathAsInline: true
                 )
+                appendNewline(with: paragraph)
             }
         }
         return index
     }
 
-    private func appendInline(_ text: String, style: InlineStyle) {
+    @discardableResult
+    private func appendInline(
+        _ text: String,
+        style: InlineStyle,
+        displayMathAsInline: Bool = false
+    ) -> Bool {
         let mathSpans = MathSyntax.mathSpans(in: text)
         var cursor = 0
+        var endsWithDisplayBlock = false
         for span in mathSpans {
             if span.range.location > cursor {
                 appendInlineMarkup(
@@ -493,28 +525,45 @@ private final class RichTextBuilder {
                     ),
                     style: style
                 )
+                endsWithDisplayBlock = false
             }
-            if MathSyntax.isSupportedExpression(span.expression),
-               let attachment = MathAttachmentFactory.make(
-                   expression: span.expression,
-                   display: span.isDisplay,
-                   color: style.color
-               )
-            {
-                attributedString.append(NSAttributedString(attachment: attachment))
-                hasMathAttachments = true
+            if span.isDisplay, !displayMathAsInline {
+                ensureDisplayBlockStartsOnNewline(using: style)
+                let displayParagraph = displayParagraphStyle(from: style)
+                let displayStyle = style.with(paragraphStyle: displayParagraph)
+                if MathSyntax.isSupportedExpression(span.expression, display: true),
+                   let attachment = MathAttachmentFactory.make(
+                       expression: span.expression,
+                       display: true,
+                       color: style.color
+                   )
+                {
+                    appendAttachment(attachment, style: displayStyle)
+                    hasMathAttachments = true
+                } else {
+                    fallbackMathSources.append(span.source)
+                    appendMathSource(span.source, style: displayStyle)
+                }
+                appendNewline(with: displayParagraph)
+                endsWithDisplayBlock = true
             } else {
-                fallbackMathSources.append(span.source)
-                attributedString.append(
-                    NSAttributedString(
-                        string: span.source,
-                        attributes: [
-                            .font: theme.codeFont,
-                            .foregroundColor: style.color,
-                            .backgroundColor: theme.codeBackgroundColor,
-                        ]
+                if MathSyntax.isSupportedExpression(
+                    span.expression,
+                    display: span.isDisplay
+                ),
+                   let attachment = MathAttachmentFactory.make(
+                       expression: span.expression,
+                       display: false,
+                       color: style.color
                     )
-                )
+                {
+                    appendAttachment(attachment, style: style)
+                    hasMathAttachments = true
+                } else {
+                    fallbackMathSources.append(span.source)
+                    appendMathSource(span.source, style: style)
+                }
+                endsWithDisplayBlock = false
             }
             cursor = span.range.location + span.range.length
         }
@@ -523,19 +572,64 @@ private final class RichTextBuilder {
                 (text as NSString).substring(from: cursor),
                 style: style
             )
+            endsWithDisplayBlock = false
         }
+        return endsWithDisplayBlock
+    }
+
+    private func appendAttachment(
+        _ attachment: NSTextAttachment,
+        style: InlineStyle
+    ) {
+        let value = NSMutableAttributedString(attachment: attachment)
+        value.addAttributes(
+            style.attributes,
+            range: NSRange(location: 0, length: value.length)
+        )
+        attributedString.append(value)
+    }
+
+    private func appendMathSource(_ source: String, style: InlineStyle) {
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: theme.codeFont,
+            .foregroundColor: style.color,
+            .backgroundColor: theme.codeBackgroundColor,
+        ]
+        if let paragraphStyle = style.paragraphStyle {
+            attributes[.paragraphStyle] = paragraphStyle
+        }
+        attributedString.append(
+            NSAttributedString(string: source, attributes: attributes)
+        )
+    }
+
+    private func ensureDisplayBlockStartsOnNewline(using style: InlineStyle) {
+        guard !attributedString.string.isEmpty,
+              !attributedString.string.hasSuffix("\n")
+        else {
+            return
+        }
+        appendNewline(with: style.paragraphStyle ?? NSMutableParagraphStyle())
+    }
+
+    private func displayParagraphStyle(from style: InlineStyle) -> NSMutableParagraphStyle {
+        let paragraph = style.paragraphStyle?.mutableCopy() as? NSMutableParagraphStyle
+            ?? NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.paragraphSpacingBefore = max(8, paragraph.paragraphSpacingBefore)
+        paragraph.paragraphSpacing = max(8, paragraph.paragraphSpacing)
+        return paragraph
     }
 
     private func appendInlineMarkup(_ text: String, style: InlineStyle) {
         if MathSyntax.hasUnclosedMathDelimiter(in: text) {
+            var attributes = style.attributes
+            attributes[.font] = theme.codeFont
+            attributes[.backgroundColor] = theme.codeBackgroundColor
             attributedString.append(
                 NSAttributedString(
                     string: text,
-                    attributes: [
-                        .font: theme.codeFont,
-                        .foregroundColor: style.color,
-                        .backgroundColor: theme.codeBackgroundColor,
-                    ]
+                    attributes: attributes
                 )
             )
             return
@@ -563,14 +657,13 @@ private final class RichTextBuilder {
                     flushPlain(to: index)
                     let codeStart = text.index(after: index)
                     let code = String(text[codeStart..<closing])
+                    var attributes = style.attributes
+                    attributes[.font] = theme.codeFont
+                    attributes[.backgroundColor] = theme.codeBackgroundColor
                     attributedString.append(
                         NSAttributedString(
                             string: code,
-                            attributes: [
-                                .font: theme.codeFont,
-                                .foregroundColor: style.color,
-                                .backgroundColor: theme.codeBackgroundColor,
-                            ]
+                            attributes: attributes
                         )
                     )
                     index = text.index(after: closing)
@@ -602,14 +695,13 @@ private final class RichTextBuilder {
                 if let closeParen = text[urlStart...].firstIndex(of: ")") {
                     flushPlain(to: index)
                     let label = String(text[text.index(after: index)..<closeBracket])
+                    var attributes = style.attributes
+                    attributes[.foregroundColor] = theme.accentColor
+                    attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
                     attributedString.append(
                         NSAttributedString(
                             string: label,
-                            attributes: [
-                                .font: style.font,
-                                .foregroundColor: theme.accentColor,
-                                .underlineStyle: NSUnderlineStyle.single.rawValue,
-                            ]
+                            attributes: attributes
                         )
                     )
                     index = text.index(after: closeParen)
@@ -627,14 +719,13 @@ private final class RichTextBuilder {
                         // MathSyntax. A remaining canonical opener is a
                         // malformed equation, so preserve its source rather
                         // than interpreting it as a Markdown escape.
+                        var attributes = style.attributes
+                        attributes[.font] = theme.codeFont
+                        attributes[.backgroundColor] = theme.codeBackgroundColor
                         attributedString.append(
                             NSAttributedString(
                                 string: String(text[index...]),
-                                attributes: [
-                                    .font: theme.codeFont,
-                                    .foregroundColor: style.color,
-                                    .backgroundColor: theme.codeBackgroundColor,
-                                ]
+                                attributes: attributes
                             )
                         )
                         return
@@ -759,6 +850,21 @@ private struct InlineStyle {
     let color: NSColor
     var bold = false
     var italic = false
+    var paragraphStyle: NSParagraphStyle?
+
+    init(
+        font: NSFont,
+        color: NSColor,
+        bold: Bool = false,
+        italic: Bool = false,
+        paragraphStyle: NSParagraphStyle? = nil
+    ) {
+        self.font = font
+        self.color = color
+        self.bold = bold
+        self.italic = italic
+        self.paragraphStyle = paragraphStyle
+    }
 
     var attributes: [NSAttributedString.Key: Any] {
         var attributes: [NSAttributedString.Key: Any] = [
@@ -771,6 +877,9 @@ private struct InlineStyle {
         if italic {
             attributes[.obliqueness] = 0.15
         }
+        if let paragraphStyle {
+            attributes[.paragraphStyle] = paragraphStyle
+        }
         return attributes
     }
 
@@ -781,6 +890,12 @@ private struct InlineStyle {
         } else if marker == "*" || marker == "_" {
             copy.italic = true
         }
+        return copy
+    }
+
+    func with(paragraphStyle: NSParagraphStyle) -> InlineStyle {
+        var copy = self
+        copy.paragraphStyle = paragraphStyle
         return copy
     }
 }
@@ -850,9 +965,10 @@ private final class NativeMathImageRenderer {
             return nil
         }
         let metrics = measure(node, font: baseFont)
+        let padding: CGFloat = 3
         let size = NSSize(
-            width: max(4, ceil(metrics.width + 6)),
-            height: max(4, ceil(metrics.ascent + metrics.descent + 6))
+            width: max(4, ceil(metrics.width + padding * 2)),
+            height: max(4, ceil(metrics.ascent + metrics.descent + padding * 2))
         )
         guard let bitmap = NSBitmapImageRep(
             bitmapDataPlanes: nil,
@@ -873,7 +989,7 @@ private final class NativeMathImageRenderer {
         NSGraphicsContext.current = context
         draw(
             node,
-            at: NSPoint(x: 3, y: 3 + metrics.descent),
+            at: NSPoint(x: padding, y: padding + metrics.descent),
             font: baseFont
         )
         context.flushGraphics()
@@ -905,18 +1021,26 @@ private final class NativeMathImageRenderer {
             let smallFont = NSFont.systemFont(ofSize: font.pointSize * 0.72)
             let top = measure(numerator, font: smallFont)
             let bottom = measure(denominator, font: smallFont)
+            let gap = max(2, font.pointSize * 0.12)
+            let rule = max(1, font.pointSize / 14)
+            let numeratorBaseline = bottom.ascent
+                + gap
+                + rule
+                + gap
+                + top.descent
             return Metrics(
                 width: max(top.width, bottom.width) + 8,
-                ascent: top.ascent + top.descent + 4,
-                descent: bottom.ascent + bottom.descent + 4
+                ascent: numeratorBaseline + top.ascent,
+                descent: bottom.descent
             )
         case let .radical(content):
             let inner = measure(content, font: font)
-            let root = ("√" as NSString).size(withAttributes: [.font: font])
+            let root = measure(.text("√"), font: font)
+            let barClearance = max(1, font.pointSize / 14) + 1
             return Metrics(
                 width: root.width + inner.width + 2,
-                ascent: max(root.height, inner.ascent),
-                descent: inner.descent
+                ascent: max(root.ascent, inner.ascent) + barClearance,
+                descent: max(root.descent, inner.descent)
             )
         case let .scripts(base, superscript, subscriptNode):
             let baseMetrics = measure(base, font: font)
@@ -924,81 +1048,120 @@ private final class NativeMathImageRenderer {
             let superMetrics = superscript.map { measure($0, font: scriptFont) }
             let subMetrics = subscriptNode.map { measure($0, font: scriptFont) }
             let scriptWidth = max(superMetrics?.width ?? 0, subMetrics?.width ?? 0)
+            let superBaseline = superMetrics.map { _ in baseMetrics.ascent * 0.62 }
+            let subBaseline = subMetrics.map {
+                -(baseMetrics.descent * 0.65 + $0.ascent * 0.25)
+            }
             return Metrics(
                 width: baseMetrics.width + scriptWidth,
-                ascent: baseMetrics.ascent + (superMetrics?.ascent ?? 0) * 0.72,
-                descent: baseMetrics.descent + (subMetrics?.descent ?? 0) * 0.72
+                ascent: max(
+                    baseMetrics.ascent,
+                    (superBaseline ?? 0) + (superMetrics?.ascent ?? 0)
+                ),
+                descent: max(
+                    baseMetrics.descent,
+                    -(subBaseline ?? 0) + (subMetrics?.descent ?? 0)
+                )
             )
         }
     }
 
-    private func draw(_ node: MathNode, at point: NSPoint, font: NSFont) {
+    private func draw(_ node: MathNode, at baseline: NSPoint, font: NSFont) {
         switch node {
         case let .text(value):
             (value as NSString).draw(
-                at: point,
+                at: NSPoint(
+                    x: baseline.x,
+                    y: baseline.y + font.descender
+                ),
                 withAttributes: [.font: font, .foregroundColor: color]
             )
         case let .sequence(nodes):
-            var x = point.x
+            var x = baseline.x
             for child in nodes {
                 let metrics = measure(child, font: font)
-                draw(child, at: NSPoint(x: x, y: point.y), font: font)
+                draw(child, at: NSPoint(x: x, y: baseline.y), font: font)
                 x += metrics.width
             }
         case let .fraction(numerator, denominator):
             let smallFont = NSFont.systemFont(ofSize: font.pointSize * 0.72)
             let top = measure(numerator, font: smallFont)
             let bottom = measure(denominator, font: smallFont)
-            let width = max(top.width, bottom.width)
+            let gap = max(2, font.pointSize * 0.12)
+            let rule = max(1, font.pointSize / 14)
+            let width = max(top.width, bottom.width) + 8
+            let numeratorBaseline = baseline.y
+                + bottom.ascent
+                + gap
+                + rule
+                + gap
+                + top.descent
             draw(
                 numerator,
-                at: NSPoint(x: point.x + (width - top.width) / 2, y: point.y + bottom.ascent + bottom.descent + 3),
+                at: NSPoint(
+                    x: baseline.x + (width - top.width) / 2,
+                    y: numeratorBaseline
+                ),
                 font: smallFont
             )
-            let lineY = point.y + bottom.ascent + bottom.descent + 1
+            let lineY = baseline.y + bottom.ascent + gap + rule / 2
             let path = NSBezierPath()
-            path.move(to: NSPoint(x: point.x, y: lineY))
-            path.line(to: NSPoint(x: point.x + width + 8, y: lineY))
-            path.lineWidth = max(1, font.pointSize / 14)
+            path.move(to: NSPoint(x: baseline.x, y: lineY))
+            path.line(to: NSPoint(x: baseline.x + width, y: lineY))
+            path.lineWidth = rule
             color.setStroke()
             path.stroke()
             draw(
                 denominator,
-                at: NSPoint(x: point.x + (width - bottom.width) / 2, y: point.y),
+                at: NSPoint(
+                    x: baseline.x + (width - bottom.width) / 2,
+                    y: baseline.y
+                ),
                 font: smallFont
             )
         case let .radical(content):
             let root = "√" as NSString
-            let rootSize = root.size(withAttributes: [.font: font])
+            let rootMetrics = measure(.text("√"), font: font)
             root.draw(
-                at: point,
+                at: NSPoint(
+                    x: baseline.x,
+                    y: baseline.y + font.descender
+                ),
                 withAttributes: [.font: font, .foregroundColor: color]
             )
-            let innerPoint = NSPoint(x: point.x + rootSize.width, y: point.y)
+            let innerPoint = NSPoint(x: baseline.x + rootMetrics.width, y: baseline.y)
             draw(content, at: innerPoint, font: font)
             let inner = measure(content, font: font)
             let path = NSBezierPath()
-            path.move(to: NSPoint(x: innerPoint.x, y: point.y + font.ascender + 1))
-            path.line(to: NSPoint(x: innerPoint.x + inner.width, y: point.y + font.ascender + 1))
+            let barY = baseline.y + inner.ascent + max(1, font.pointSize / 14)
+            path.move(to: NSPoint(x: innerPoint.x, y: barY))
+            path.line(to: NSPoint(x: innerPoint.x + inner.width, y: barY))
             path.lineWidth = max(1, font.pointSize / 14)
             color.setStroke()
             path.stroke()
         case let .scripts(base, superscript, subscriptNode):
             let baseMetrics = measure(base, font: font)
-            draw(base, at: point, font: font)
+            draw(base, at: baseline, font: font)
             let scriptFont = NSFont.systemFont(ofSize: font.pointSize * 0.62)
+            let subMetrics = subscriptNode.map { measure($0, font: scriptFont) }
             if let superscript {
                 draw(
                     superscript,
-                    at: NSPoint(x: point.x + baseMetrics.width, y: point.y + font.ascender * 0.70),
+                    at: NSPoint(
+                        x: baseline.x + baseMetrics.width,
+                        y: baseline.y + baseMetrics.ascent * 0.62
+                    ),
                     font: scriptFont
                 )
             }
             if let subscriptNode {
                 draw(
                     subscriptNode,
-                    at: NSPoint(x: point.x + baseMetrics.width, y: point.y - font.descender * 0.55),
+                    at: NSPoint(
+                        x: baseline.x + baseMetrics.width,
+                        y: baseline.y
+                            - (baseMetrics.descent * 0.65 + (subMetrics?.ascent ?? 0) * 0.25)
+                    ),
                     font: scriptFont
                 )
             }
@@ -1023,9 +1186,11 @@ private final class MathExpressionParser {
 
     private func parseSequence(until closing: Character?) -> MathNode? {
         var nodes: [MathNode] = []
+        var didClose = closing == nil
         while index < characters.count {
             if let closing, characters[index] == closing {
                 index += 1
+                didClose = true
                 break
             }
             if characters[index] == "^" || characters[index] == "_" {
@@ -1049,7 +1214,7 @@ private final class MathExpressionParser {
             }
             nodes.append(atom)
         }
-        guard !nodes.isEmpty, closing == nil || index <= characters.count else {
+        guard !nodes.isEmpty, didClose else {
             return nil
         }
         return nodes.count == 1 ? nodes[0] : .sequence(nodes)
@@ -1082,7 +1247,7 @@ private final class MathExpressionParser {
             index += 1
             return .text(" ")
         }
-        guard character != "}" && character != "]" && character != "&" else {
+        guard character != "}" && character != "&" else {
             return nil
         }
         index += 1
@@ -1165,6 +1330,7 @@ private final class MathExpressionParser {
         "nabla": "∇", "rightarrow": "→", "leftarrow": "←", "Rightarrow": "⇒",
         "Leftarrow": "⇐", "to": "→", "in": "∈", "notin": "∉", "subset": "⊂",
         "subseteq": "⊆", "cup": "∪", "cap": "∩", "forall": "∀", "exists": "∃",
+        "langle": "⟨", "rangle": "⟩", "vert": "|", "Vert": "‖",
         "sin": "sin", "cos": "cos", "tan": "tan", "cot": "cot", "sec": "sec",
         "csc": "csc", "log": "log", "ln": "ln", "exp": "exp", "lim": "lim",
     ]

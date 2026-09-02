@@ -359,6 +359,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
     }
 
     private func updateInterface() {
+        updateComposerLayout()
         renderTranscript()
         renderAttachmentStrip()
         promptView.isEditable = !isLoading
@@ -371,7 +372,6 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
             progressIndicator.stopAnimation(nil)
         }
         submitButton.isHidden = isLoading
-        updateComposerLayout()
         updateHeader()
         updatePlaceholder()
         updateSubmitButton()
@@ -535,6 +535,12 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
 
         transcriptView.textStorage?.setAttributedString(rendered)
         transcriptView.sourceSegments = richSourceSegments
+        let viewportHeight = transcriptScrollView.contentView.bounds.height
+        let contentHeight = NativeTextViewLayout.fitDocumentView(
+            transcriptView,
+            minimumHeight: viewportHeight
+        )
+        transcriptScrollView.hasVerticalScroller = contentHeight > viewportHeight + 0.5
         switch transcriptScrollTarget {
         case .top:
             scrollTranscriptToTop()
@@ -575,7 +581,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         paragraph.tailIndent = -18
         rendered.append(
             NSAttributedString(
-                string: "Explain\u{2028}",
+                string: "Explain\n",
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
                     .foregroundColor: ShortcutUIStyle.secondaryTextColor,
@@ -689,7 +695,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         paragraph.lineSpacing = 4
         rendered.append(
             NSAttributedString(
-                string: "You\u{2028}",
+                string: "You\n",
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
                     .foregroundColor: ShortcutUIStyle.accentColor,
@@ -726,7 +732,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         paragraph.tailIndent = -18
         rendered.append(
             NSAttributedString(
-                string: "Explain\u{2028}",
+                string: "Explain\n",
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
                     .foregroundColor: ShortcutUIStyle.secondaryTextColor,

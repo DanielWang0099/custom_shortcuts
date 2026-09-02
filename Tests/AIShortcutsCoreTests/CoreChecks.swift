@@ -115,6 +115,14 @@ struct CoreChecks {
             document.source == "# Result\n\nValue: \\(x^2\\)",
             "AI output documents did not normalize source text."
         )
+        let separatedDocument = AIOutputDocument(
+            format: .markdown,
+            source: "First\u{2028}Second\u{2029}Third"
+        )
+        try expect(
+            separatedDocument.source == "First\nSecond\nThird",
+            "AI output documents did not normalize Unicode line separators."
+        )
 
         try expect(
             AIOutputPolicy.allowedFormats(for: .ocr) == [.plainText]

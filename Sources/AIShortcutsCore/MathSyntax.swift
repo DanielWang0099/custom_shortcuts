@@ -215,10 +215,19 @@ public enum MathSyntax {
         return false
     }
 
-    public static func isSupportedExpression(_ expression: String) -> Bool {
-        let trimmed = expression.trimmingCharacters(in: .whitespacesAndNewlines)
+    public static func isSupportedExpression(
+        _ expression: String,
+        display: Bool = false
+    ) -> Bool {
+        let source = display
+            ? expression
+                .replacingOccurrences(of: "\r\n", with: " ")
+                .replacingOccurrences(of: "\r", with: " ")
+                .replacingOccurrences(of: "\n", with: " ")
+            : expression
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
-              !trimmed.contains("\n"),
+              display || !trimmed.contains("\n"),
               !trimmed.contains("&"),
               !trimmed.contains("\\begin"),
               !trimmed.contains("\\end")
@@ -279,6 +288,7 @@ public enum MathSyntax {
         "mp", "le", "leq", "ge", "geq", "neq", "approx", "sim", "equiv", "infty", "odot",
         "partial", "nabla", "rightarrow", "leftarrow", "Rightarrow", "Leftarrow",
         "to", "in", "notin", "subset", "subseteq", "cup", "cap", "forall", "exists",
+        "langle", "rangle", "vert", "Vert",
         "sin", "cos", "tan", "cot", "sec", "csc", "log", "ln", "exp", "lim",
         "left", "right",
     ]

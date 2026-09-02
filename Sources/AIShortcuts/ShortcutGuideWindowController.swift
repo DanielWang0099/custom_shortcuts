@@ -213,13 +213,13 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
         case .explain:
             return (
                 "Ask about hidden selected text, type a general question, or paste up to four images.",
-                "Result · Assistant answers render guarded Markdown and common LaTeX in a selectable conversation with transient one-hour context.",
+                "Result · Assistant answers render guarded Markdown and common LaTeX in a selectable conversation; display equations are centered blocks and unsupported source stays visible.",
                 "Accessibility + OpenAI"
             )
         case .calculate:
             return (
                 "Crop visual data and optionally describe the calculation or extraction you need.",
-                "Result · Shows a selectable, scrollable rich answer until the cursor moves away and copies its source plus rich clipboard formats.",
+                "Result · Shows a selectable, scrollable rich answer until the cursor moves away; centered display equations and unsupported source remain visible, and the answer copies with rich formats.",
                 "Screen Recording + OpenAI"
             )
         case .inputLock:
