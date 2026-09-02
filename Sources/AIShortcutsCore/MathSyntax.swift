@@ -125,6 +125,96 @@ public enum MathSyntax {
         return spans
     }
 
+    /// Returns true when a likely math opener outside code has no matching
+    /// closer. The renderer uses this to keep malformed source styled instead
+    /// of accidentally treating `\(` or `\[` as a Markdown escape.
+    public static func hasUnclosedMathDelimiter(in source: String) -> Bool {
+        var index = source.startIndex
+        var isLineStart = true
+        var inFence = false
+        var inInlineCode = false
+
+        while index < source.endIndex {
+            let character = source[index]
+            if character == "\n" {
+                isLineStart = true
+                index = source.index(after: index)
+                continue
+            }
+            if isLineStart {
+                let lineStart = source[index...]
+                if lineStart.hasPrefix("```") || lineStart.hasPrefix("~~~") {
+                    inFence.toggle()
+                    inInlineCode = false
+                    index = endOfLine(in: source, from: index)
+                    isLineStart = false
+                    continue
+                }
+                isLineStart = false
+            }
+            if inFence {
+                index = source.index(after: index)
+                continue
+            }
+            if character == "`" {
+                inInlineCode.toggle()
+                index = source.index(after: index)
+                continue
+            }
+            if inInlineCode {
+                index = source.index(after: index)
+                continue
+            }
+
+            if source[index...].hasPrefix("\\(") {
+                guard source.range(
+                    of: "\\)",
+                    range: source.index(after: index)..<source.endIndex
+                ) != nil else {
+                    return true
+                }
+                index = source.index(index, offsetBy: 2)
+                continue
+            }
+            if source[index...].hasPrefix("\\[") {
+                guard source.range(
+                    of: "\\]",
+                    range: source.index(after: index)..<source.endIndex
+                ) != nil else {
+                    return true
+                }
+                index = source.index(index, offsetBy: 2)
+                continue
+            }
+            if source[index...].hasPrefix("$$") {
+                guard source.range(
+                    of: "$$",
+                    range: source.index(index, offsetBy: 2)..<source.endIndex
+                ) != nil else {
+                    return true
+                }
+                index = source.index(index, offsetBy: 2)
+                continue
+            }
+            if character == "$",
+               !isEscaped(source, at: index),
+               nextCharacter(in: source, after: index) != "$",
+               nextCharacter(in: source, after: index)?.isWhitespace != true,
+               nextCharacter(in: source, after: index)?.isNumber != true
+            {
+                let lineEnd = endOfLine(in: source, from: index)
+                guard source.range(
+                    of: "$",
+                    range: source.index(after: index)..<lineEnd
+                ) != nil else {
+                    return true
+                }
+            }
+            index = source.index(after: index)
+        }
+        return false
+    }
+
     public static func isSupportedExpression(_ expression: String) -> Bool {
         let trimmed = expression.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,

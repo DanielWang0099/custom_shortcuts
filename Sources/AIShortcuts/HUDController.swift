@@ -1,5 +1,6 @@
 import AppKit
 import AIShortcutsCore
+import AIShortcutsRendering
 
 @MainActor
 final class HUDController {
@@ -42,9 +43,18 @@ final class HUDController {
     }
 
     func showResult(text: String) {
+        showResult(
+            rendered: NativeRichTextRenderer().render(
+                AIOutputDocument(format: .plainText, source: text)
+            )
+        )
+    }
+
+    func showResult(rendered: RenderedRichText) {
         show(
             symbolName: "checkmark",
-            text: text,
+            text: nil,
+            rendered: rendered,
             tone: .success,
             duration: nil,
             presentation: .result
@@ -74,6 +84,7 @@ final class HUDController {
     private func show(
         symbolName: String,
         text: String?,
+        rendered: RenderedRichText? = nil,
         tone: Tone,
         duration: TimeInterval?,
         presentation: Presentation
@@ -83,7 +94,7 @@ final class HUDController {
         stopMouseExitDismissal()
         panel?.orderOut(nil)
 
-        let message = text ?? ""
+        let message = text ?? rendered?.clipboardPayload.plainText ?? ""
         let label = NSTextField(labelWithString: message)
         label.font = .systemFont(ofSize: 13, weight: .medium)
         label.textColor = ShortcutUIStyle.primaryTextColor
@@ -98,6 +109,8 @@ final class HUDController {
         let height: CGFloat
         let labelFrame: NSRect
         let imageFrame: NSRect
+        let resultScrollFrame: NSRect?
+        let resultTextView: NSTextView?
         switch presentation {
         case .compact:
             label.sizeToFit()
@@ -105,32 +118,69 @@ final class HUDController {
             height = 44
             labelFrame = NSRect(x: 44, y: 13, width: width - 58, height: 18)
             imageFrame = NSRect(x: 14, y: 13, width: 18, height: 18)
+            resultScrollFrame = nil
+            resultTextView = nil
         case .result:
-            width = 460
+            width = 520
             let contentWidth = width - 58
-            let font = label.font ?? .systemFont(ofSize: 13, weight: .medium)
-            let measuredHeight = hasText
-                ? ceil(
-                    (message as NSString).boundingRect(
-                        with: NSSize(
-                            width: contentWidth,
-                            height: CGFloat.greatestFiniteMagnitude
-                        ),
-                        options: [.usesLineFragmentOrigin, .usesFontLeading],
-                        attributes: [.font: font]
-                    ).height
+            let textView = NSTextView(
+                frame: NSRect(
+                    x: 0,
+                    y: 0,
+                    width: contentWidth,
+                    height: 100
                 )
-                : 18
-            let maxBodyHeight = NSLayoutManager().defaultLineHeight(for: font) * 8
+            )
+            textView.isEditable = false
+            textView.isSelectable = true
+            textView.drawsBackground = false
+            textView.isRichText = true
+            textView.importsGraphics = true
+            textView.textContainerInset = NSSize(width: 2, height: 4)
+            textView.textContainer?.widthTracksTextView = true
+            textView.textContainer?.containerSize = NSSize(
+                width: contentWidth - 4,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+            let attributed = rendered?.attributedString
+                ?? NSAttributedString(
+                    string: message,
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 15),
+                        .foregroundColor: ShortcutUIStyle.primaryTextColor,
+                    ]
+                )
+            textView.textStorage?.setAttributedString(attributed)
+            if let layoutManager = textView.layoutManager,
+               let textContainer = textView.textContainer
+            {
+                layoutManager.ensureLayout(for: textContainer)
+            }
+            let measuredHeight = max(
+                18,
+                ceil(
+                    (textView.layoutManager?.usedRect(for: textView.textContainer!).height ?? 18)
+                        + textView.textContainerInset.height * 2
+                )
+            )
+            let maxBodyHeight: CGFloat = 360
             let bodyHeight = min(maxBodyHeight, max(18, measuredHeight))
             height = bodyHeight + 28
-            labelFrame = NSRect(
+            labelFrame = .zero
+            imageFrame = NSRect(x: 14, y: height - 32, width: 18, height: 18)
+            resultScrollFrame = NSRect(
                 x: 44,
                 y: 14,
                 width: contentWidth,
                 height: bodyHeight
             )
-            imageFrame = NSRect(x: 14, y: height - 32, width: 18, height: 18)
+            textView.frame = NSRect(
+                x: 0,
+                y: 0,
+                width: contentWidth,
+                height: max(bodyHeight, measuredHeight)
+            )
+            resultTextView = textView
         }
         let hudPanel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
@@ -143,7 +193,7 @@ final class HUDController {
         hudPanel.backgroundColor = .clear
         hudPanel.hasShadow = true
         hudPanel.appearance = NSAppearance(named: .darkAqua)
-        hudPanel.ignoresMouseEvents = true
+        hudPanel.ignoresMouseEvents = presentation != .result
         hudPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
 
         let background = NSView(frame: hudPanel.contentView?.bounds ?? .zero)
@@ -160,7 +210,16 @@ final class HUDController {
         imageView.contentTintColor = tone.accentColor
         background.addSubview(imageView)
 
-        if hasText {
+        if presentation == .result, let resultScrollFrame, let resultTextView {
+            let scrollView = NSScrollView(frame: resultScrollFrame)
+            scrollView.drawsBackground = false
+            scrollView.borderType = .noBorder
+            scrollView.hasVerticalScroller = resultTextView.frame.height > resultScrollFrame.height
+            scrollView.scrollerStyle = .overlay
+            scrollView.autohidesScrollers = true
+            scrollView.documentView = resultTextView
+            background.addSubview(scrollView)
+        } else if hasText {
             label.frame = labelFrame
             background.addSubview(label)
         }

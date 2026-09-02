@@ -14,9 +14,18 @@ let package = Package(
         .target(
             name: "AIShortcutsCore"
         ),
+        .target(
+            name: "AIShortcutsRendering",
+            dependencies: ["AIShortcutsCore"],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("CoreText"),
+                .linkedFramework("CoreGraphics"),
+            ]
+        ),
         .executableTarget(
             name: "AIShortcuts",
-            dependencies: ["AIShortcutsCore"],
+            dependencies: ["AIShortcutsCore", "AIShortcutsRendering"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),
@@ -29,6 +38,14 @@ let package = Package(
             name: "AIShortcutsCoreChecks",
             dependencies: ["AIShortcutsCore"],
             path: "Tests/AIShortcutsCoreTests"
+        ),
+        .executableTarget(
+            name: "AIShortcutsRenderingChecks",
+            dependencies: ["AIShortcutsCore", "AIShortcutsRendering"],
+            path: "Tests/AIShortcutsRenderingChecks",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+            ]
         ),
     ]
 )

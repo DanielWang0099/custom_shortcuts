@@ -3,12 +3,24 @@ import Foundation
 public struct ExplanationExchange: Equatable, Sendable {
     public let highlightedText: String
     public let request: String
-    public let explanation: String
+    public let explanation: AIOutputDocument
 
     public init(
         highlightedText: String,
         request: String,
         explanation: String
+    ) {
+        self.init(
+            highlightedText: highlightedText,
+            request: request,
+            explanation: AIOutputDocument(format: .plainText, source: explanation)
+        )
+    }
+
+    public init(
+        highlightedText: String,
+        request: String,
+        explanation: AIOutputDocument
     ) {
         self.highlightedText = highlightedText
         self.request = request
@@ -48,7 +60,7 @@ public struct ExplanationConversationMemory: Sendable {
             Request:
             \(request)
             Explanation:
-            \(exchange.explanation)
+            \(exchange.explanation.source)
             """
         }.joined(separator: "\n\n")
     }
@@ -62,6 +74,20 @@ public struct ExplanationConversationMemory: Sendable {
         highlightedText: String,
         request: String,
         explanation: String,
+        now: Date = Date()
+    ) {
+        record(
+            highlightedText: highlightedText,
+            request: request,
+            explanation: AIOutputDocument(format: .plainText, source: explanation),
+            now: now
+        )
+    }
+
+    public mutating func record(
+        highlightedText: String,
+        request: String,
+        explanation: AIOutputDocument,
         now: Date = Date()
     ) {
         resetIfIdle(now: now)
@@ -104,7 +130,7 @@ public struct ExplanationConversationMemory: Sendable {
             total
                 + exchange.highlightedText.utf8.count
                 + exchange.request.utf8.count
-                + exchange.explanation.utf8.count
+                + exchange.explanation.source.utf8.count
                 + 128
         }
     }

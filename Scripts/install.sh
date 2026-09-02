@@ -46,6 +46,7 @@ fi
 unset API_KEY
 
 swift run AIShortcutsCoreChecks
+swift run AIShortcutsRenderingChecks
 swift build -c release --product AIShortcuts
 BIN_PATH=$(swift build -c release --show-bin-path)
 

@@ -302,8 +302,11 @@ public struct ResponsesAPIClient: Sendable {
             throw ResponsesAPIError.refusal(refusal)
         }
 
+        if let incompleteDetails = response.incompleteDetails {
+            throw ResponsesAPIError.incomplete(incompleteDetails.reason ?? "")
+        }
         guard response.status == nil || response.status == "completed" else {
-            throw ResponsesAPIError.incomplete(response.incompleteDetails?.reason ?? "")
+            throw ResponsesAPIError.incomplete("")
         }
 
         let fragments = allContent
@@ -468,11 +471,68 @@ private struct OutputContent: Decodable {
 private struct TextDocumentEnvelope: Decodable {
     let format: AIOutputFormat
     let content: String
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: StrictObjectCodingKey.self)
+        let keys = Set(container.allKeys.map(\.stringValue))
+        guard keys == ["format", "content"] else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "The text document envelope must contain exactly format and content."
+                )
+            )
+        }
+        self.format = try container.decode(
+            AIOutputFormat.self,
+            forKey: StrictObjectCodingKey(stringValue: "format")!
+        )
+        self.content = try container.decode(
+            String.self,
+            forKey: StrictObjectCodingKey(stringValue: "content")!
+        )
+    }
 }
 
 private struct CalculateDocumentEnvelope: Decodable {
     let format: AIOutputFormat
     let answer: String
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: StrictObjectCodingKey.self)
+        let keys = Set(container.allKeys.map(\.stringValue))
+        guard keys == ["format", "answer"] else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "The calculate envelope must contain exactly format and answer."
+                )
+            )
+        }
+        self.format = try container.decode(
+            AIOutputFormat.self,
+            forKey: StrictObjectCodingKey(stringValue: "format")!
+        )
+        self.answer = try container.decode(
+            String.self,
+            forKey: StrictObjectCodingKey(stringValue: "answer")!
+        )
+    }
+}
+
+private struct StrictObjectCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
 }
 
 private struct Usage: Decodable {

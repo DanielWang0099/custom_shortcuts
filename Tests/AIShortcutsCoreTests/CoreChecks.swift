@@ -172,6 +172,12 @@ struct CoreChecks {
             "Math scanning interpreted currency or code content as equations."
         )
         try expect(
+            MathSyntax.hasUnclosedMathDelimiter(in: "Broken \\(x^2")
+                && MathSyntax.hasUnclosedMathDelimiter(in: "Broken $x^2")
+                && !MathSyntax.hasUnclosedMathDelimiter(in: "Price $5.00"),
+            "Malformed math delimiters were not distinguished from currency."
+        )
+        try expect(
             MathSyntax.isSupportedExpression("x^2 + \\frac{1}{2} + \\sqrt{y}")
                 && MathSyntax.isSupportedExpression("\\alpha_1 + \\sum x")
                 && !MathSyntax.isSupportedExpression("\\begin{matrix}a & b\\end{matrix}"),
@@ -194,6 +200,14 @@ struct CoreChecks {
             )
             throw CheckFailure(description: "Embedded Markdown images were accepted.")
         } catch AIOutputValidationError.embeddedImage {
+            // Expected.
+        }
+        do {
+            try AIOutputDocumentValidator.validate(
+                AIOutputDocument(format: .markdown, source: "[unsafe](<javascript:alert(1)>)")
+            )
+            throw CheckFailure(description: "Angle-bracket unsafe links were accepted.")
+        } catch AIOutputValidationError.unsafeLink {
             // Expected.
         }
     }
@@ -244,6 +258,58 @@ struct CoreChecks {
             ),
             "Calculate answer output was not isolated from its JSON envelope."
         )
+
+        let literalOCRPayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"plain_text\",\"content\":\"*literal* \\\\(x\\\\)\"}"}]}]}"##.utf8
+        )
+        let literalOCR = try ResponsesAPIClient.parseCompletion(
+            from: literalOCRPayload,
+            outputSchema: .textDocument,
+            allowedOutputFormats: [.plainText]
+        )
+        try expect(
+            literalOCR.output.format == .plainText
+                && literalOCR.output.source == "*literal* \\(x\\)",
+            "OCR plain text was interpreted as rich formatting instead of remaining literal."
+        )
+
+        let malformedEnvelopePayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"not-json"}]}]}"##.utf8
+        )
+        do {
+            _ = try ResponsesAPIClient.parseCompletion(
+                from: malformedEnvelopePayload,
+                outputSchema: .textDocument,
+                allowedOutputFormats: [.plainText]
+            )
+            throw CheckFailure(description: "Malformed document JSON was accepted.")
+        } catch ResponsesAPIError.invalidOutput {
+            // Expected.
+        }
+
+        let extraFieldPayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"plain_text\",\"content\":\"answer\",\"extra\":true}"}]}]}"##.utf8
+        )
+        do {
+            _ = try ResponsesAPIClient.parseCompletion(
+                from: extraFieldPayload,
+                outputSchema: .textDocument,
+                allowedOutputFormats: [.plainText]
+            )
+            throw CheckFailure(description: "Unknown envelope fields were accepted.")
+        } catch ResponsesAPIError.invalidOutput {
+            // Expected.
+        }
+
+        let incompletePayload = Data(
+            ##"{"status":"completed","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"plain_text\",\"content\":\"partial\"}"}]}]}"##.utf8
+        )
+        do {
+            _ = try ResponsesAPIClient.parseCompletion(from: incompletePayload)
+            throw CheckFailure(description: "Incomplete responses were accepted.")
+        } catch ResponsesAPIError.incomplete("max_output_tokens") {
+            // Expected.
+        }
     }
 
     private static func promptAndPolicyChecks() async throws {

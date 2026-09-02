@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import AIShortcutsCore
+import AIShortcutsRendering
 import CoreGraphics
 import Foundation
 import OSLog
@@ -17,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let screenshotService = ScreenshotService()
     private let finderService = FinderSelectionService()
     private let hud = HUDController()
+    private let richTextRenderer = NativeRichTextRenderer()
     private let apiClient = ResponsesAPIClient()
     private let explanationPanel = ExplanationPanelController()
     private let inputLockPanel = InputLockPanelController()
@@ -654,12 +656,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             let completion = try await callAPI(prompt: prompt, imagePNGs: [capture.pngData])
-            guard !completion.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            guard !completion.output.isEmpty else {
                 lastAPIStatus = "No OCR text"
                 hud.showError("No readable text found")
                 return
             }
-            selectionService.placeOnClipboard(completion.text)
+            // OCR is deliberately literal: keep its pasteboard representation
+            // to plain text even though other AI outputs may be rich.
+            selectionService.placeOnClipboard(completion.output.source)
             hud.showSuccess(text: "OCR copied")
         } catch {
             guard !Task.isCancelled else {
@@ -728,11 +732,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let completion = try await callAPI(prompt: prompt, imagePNGs: [capture.pngData])
-            guard let displayText = CalculateResultPresentation.clipboardText(for: completion.text) else {
+            guard !completion.output.isEmpty else {
                 throw ResponsesAPIError.missingOutput
             }
-            selectionService.placeOnClipboard(displayText)
-            hud.showResult(text: displayText)
+            let rendered = richTextRenderer.render(completion.output)
+            selectionService.placeOnClipboard(rendered.clipboardPayload)
+            hud.showResult(rendered: rendered)
         } catch {
             guard !Task.isCancelled else {
                 return
@@ -894,16 +899,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let completion = try await callAPI(prompt: prompt)
-            guard !completion.text.isEmpty else {
+            guard !completion.output.isEmpty else {
                 throw ResponsesAPIError.missingOutput
             }
+            let rendered = richTextRenderer.render(completion.output)
             if action == .translate {
-                selectionService.placeOnClipboard(completion.text)
+                selectionService.placeOnClipboard(rendered.clipboardPayload)
                 hud.showSuccess(text: "Translation copied")
             } else {
                 let replaced = await selectionService.replaceIfUnchanged(
                     snapshot,
-                    with: completion.text
+                    with: rendered.clipboardPayload,
+                    preferAccessibility: completion.output.format == .plainText
                 )
                 let outcome = action == .refine ? "Refined" : "Formatted"
                 hud.showSuccess(
@@ -1034,13 +1041,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let completion = try await callAPI(prompt: prompt, imagePNGs: imagePNGs)
-            guard !completion.text.isEmpty else {
+            guard !completion.output.isEmpty else {
                 throw ResponsesAPIError.missingOutput
             }
             explanationMemory.record(
                 highlightedText: snapshot?.text ?? "",
                 request: Self.explanationDisplayRequest(request, imageCount: imagePNGs.count),
-                explanation: completion.text
+                explanation: completion.output
             )
             explanationPanel.complete(with: explanationMemory.activeExchanges())
         } catch {

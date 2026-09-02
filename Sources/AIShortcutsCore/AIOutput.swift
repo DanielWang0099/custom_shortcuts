@@ -67,17 +67,17 @@ public enum AIOutputDocumentValidator {
         }
 
         for line in visibleMarkdownLines(document.source) {
-            if line.range(of: #"</?[A-Za-z][^>]*>"#, options: .regularExpression) != nil {
-                throw AIOutputValidationError.rawHTML
-            }
             if line.range(of: #"!\[[^\]]*\]\([^\)]*\)"#, options: .regularExpression) != nil {
                 throw AIOutputValidationError.embeddedImage
             }
             if line.range(
-                of: #"\]\(\s*(?:javascript|data|file):"#,
+                of: #"\]\(\s*(?:<\s*)?(?:javascript|data|file|vbscript|about):"#,
                 options: [.regularExpression, .caseInsensitive]
             ) != nil {
                 throw AIOutputValidationError.unsafeLink
+            }
+            if line.range(of: #"</?[A-Za-z][^>]*>"#, options: .regularExpression) != nil {
+                throw AIOutputValidationError.rawHTML
             }
         }
     }
@@ -191,5 +191,15 @@ public enum AIOutputPolicy {
             "math",
         ]
         return markers.contains(where: normalized.contains)
+    }
+
+    public static func promptInstruction(
+        for allowedFormats: [AIOutputFormat],
+        field: String = "content"
+    ) -> String {
+        let formats = allowedFormats.map(\.rawValue).joined(separator: " or ")
+        return """
+        Return exactly one JSON object with the fields `format` and `\(field)`, with no code fence or commentary. The `format` value must be \(formats). When using Markdown, use Markdown only for useful structure, use \\(...\\) for inline equations and \\[...\\] for display equations, and never use raw HTML, embedded images, or executable links. When using plain_text, preserve literal punctuation and source markers instead of interpreting them.
+        """
     }
 }

@@ -183,25 +183,25 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
         case .ocr:
             return (
                 "Drag over any screen area to transcribe all visible text.",
-                "Result · Copied to the clipboard; the screenshot is not retained.",
+                "Result · Literal plain text is copied; the screenshot is not retained.",
                 "Screen Recording + OpenAI"
             )
         case .refine:
             return (
                 "Correct spelling, grammar, and awkward wording in selected text without changing its language.",
-                "Result · Replaces the selection only if it is unchanged; otherwise copies the revision.",
+                "Result · Preserves detected Markdown/equation mode; replaces an unchanged selection or copies the revision.",
                 "Accessibility + OpenAI"
             )
         case .translate:
             return (
                 "Translate selected text using a free-form target such as “Japanese, formal”.",
-                "Result · Copies the translation and leaves the original selection untouched.",
+                "Result · Preserves detected Markdown/equation mode, copies the translation, and leaves the original selection untouched.",
                 "Accessibility + OpenAI"
             )
         case .format:
             return (
                 "Restructure selected text using a short instruction such as “concise email with bullets”.",
-                "Result · Safely replaces an unchanged selection, or copies the formatted result.",
+                "Result · Uses guarded Markdown for structured requests; safely replaces an unchanged selection or copies the result.",
                 "Accessibility + OpenAI"
             )
         case .finderPath:
@@ -213,13 +213,13 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
         case .explain:
             return (
                 "Ask about hidden selected text, type a general question, or paste up to four images.",
-                "Result · Appears in a compact conversation window with transient one-hour context.",
+                "Result · Assistant answers render guarded Markdown and common LaTeX in a selectable conversation with transient one-hour context.",
                 "Accessibility + OpenAI"
             )
         case .calculate:
             return (
                 "Crop visual data and optionally describe the calculation or extraction you need.",
-                "Result · Shows the concise useful answer in a popup that stays until the cursor moves away, and copies only the answer.",
+                "Result · Shows a selectable, scrollable rich answer until the cursor moves away and copies its source plus rich clipboard formats.",
                 "Screen Recording + OpenAI"
             )
         case .inputLock:
