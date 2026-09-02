@@ -36,6 +36,7 @@ fi
 
 cd "${PROJECT_DIR}"
 swift run AIShortcutsCoreChecks
+swift run AIShortcutsRenderingChecks
 swift build -c release --product AIShortcuts --triple arm64-apple-macosx13.0
 swift build -c release --product AIShortcuts --triple x86_64-apple-macosx13.0
 

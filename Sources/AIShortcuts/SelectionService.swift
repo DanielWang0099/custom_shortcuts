@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import AIShortcutsCore
+import AIShortcutsRendering
 import Foundation
 
 @MainActor
@@ -48,9 +49,18 @@ final class SelectionService {
     }
 
     func placeOnClipboard(_ text: String) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        placeOnClipboard(
+            RichClipboardPayload(
+                plainText: text,
+                htmlData: nil,
+                rtfData: nil,
+                rtfdData: nil
+            )
+        )
+    }
+
+    func placeOnClipboard(_ payload: RichClipboardPayload) {
+        payload.write(to: NSPasteboard.general)
     }
 
     func insertText(
@@ -91,14 +101,31 @@ final class SelectionService {
     }
 
     func replaceIfUnchanged(_ snapshot: SelectionSnapshot, with result: String) async -> Bool {
-        placeOnClipboard(result)
+        await replaceIfUnchanged(
+            snapshot,
+            with: RichClipboardPayload(
+                plainText: result,
+                htmlData: nil,
+                rtfData: nil,
+                rtfdData: nil
+            ),
+            preferAccessibility: true
+        )
+    }
+
+    func replaceIfUnchanged(
+        _ snapshot: SelectionSnapshot,
+        with payload: RichClipboardPayload,
+        preferAccessibility: Bool = true
+    ) async -> Bool {
+        placeOnClipboard(payload)
 
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         guard frontmostPID == snapshot.processIdentifier else {
             return false
         }
 
-        if let element = snapshot.accessibilityElement {
+        if preferAccessibility, let element = snapshot.accessibilityElement {
             if let currentText = selectedText(from: element) {
                 guard SelectionReplacementPolicy.shouldReplace(
                     originalText: snapshot.text,
@@ -118,7 +145,7 @@ final class SelectionService {
                    AXUIElementSetAttributeValue(
                        element,
                        kAXSelectedTextAttribute as CFString,
-                       result as CFTypeRef
+                       payload.plainText as CFTypeRef
                    ) == .success
                 {
                     return true
@@ -138,7 +165,7 @@ final class SelectionService {
             originalProcessIdentifier: snapshot.processIdentifier,
             frontmostProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier
         )
-        placeOnClipboard(result)
+        placeOnClipboard(payload)
         guard stillMatches else {
             return false
         }

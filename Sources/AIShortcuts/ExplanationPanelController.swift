@@ -1,5 +1,6 @@
 import AppKit
 import AIShortcutsCore
+import AIShortcutsRendering
 
 @MainActor
 final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDelegate {
@@ -11,7 +12,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
     }
 
     private let panel: ExplainChatPanel
-    private let transcriptView: NSTextView
+    private let transcriptView: RichTranscriptTextView
     private let transcriptScrollView: NSScrollView
     private let promptView: PasteAwareTextView
     private let promptScrollView: NSScrollView
@@ -22,6 +23,17 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
     private let composerSurface: NSView
     private let submitButton: NSButton
     private let progressIndicator: NSProgressIndicator
+    private let richTextRenderer = NativeRichTextRenderer(
+        theme: RichTextTheme(
+            bodyFont: .systemFont(ofSize: 15),
+            codeFont: .monospacedSystemFont(ofSize: 13, weight: .regular),
+            bodyColor: ShortcutUIStyle.primaryTextColor,
+            secondaryColor: ShortcutUIStyle.secondaryTextColor,
+            accentColor: ShortcutUIStyle.accentColor,
+            codeBackgroundColor: ShortcutUIStyle.raisedSurfaceColor,
+            tableBorderColor: ShortcutUIStyle.contentBorderColor
+        )
+    )
 
     private var submitHandler: ((String, [Data]) -> Void)?
     private var exchanges: [ExplanationExchange] = []
@@ -45,7 +57,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
             backing: .buffered,
             defer: false
         )
-        transcriptView = NSTextView()
+        transcriptView = RichTranscriptTextView()
         transcriptScrollView = NSScrollView()
         promptView = PasteAwareTextView()
         promptScrollView = NSScrollView()
@@ -233,8 +245,9 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         transcriptView.isEditable = false
         transcriptView.isSelectable = true
         transcriptView.drawsBackground = false
-        transcriptView.isRichText = false
-        transcriptView.isAutomaticLinkDetectionEnabled = true
+        transcriptView.isRichText = true
+        transcriptView.importsGraphics = true
+        transcriptView.isAutomaticLinkDetectionEnabled = false
         transcriptView.textContainerInset = NSSize(width: 4, height: 8)
         transcriptView.frame = NSRect(x: 0, y: 0, width: 584, height: 188)
         transcriptView.isVerticallyResizable = true
@@ -346,6 +359,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
     }
 
     private func updateInterface() {
+        updateComposerLayout()
         renderTranscript()
         renderAttachmentStrip()
         promptView.isEditable = !isLoading
@@ -358,7 +372,6 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
             progressIndicator.stopAnimation(nil)
         }
         submitButton.isHidden = isLoading
-        updateComposerLayout()
         updateHeader()
         updatePlaceholder()
         updateSubmitButton()
@@ -488,13 +501,18 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
 
     private func renderTranscript() {
         let rendered = NSMutableAttributedString()
+        var richSourceSegments: [RichTranscriptSourceSegment] = []
         var latestUserRange: NSRange?
         var latestAssistantRange: NSRange?
         for exchange in exchanges {
             if !exchange.request.isEmpty {
                 latestUserRange = appendUserText(exchange.request, to: rendered)
             }
-            latestAssistantRange = appendAssistantText(exchange.explanation, to: rendered)
+            latestAssistantRange = appendAssistantText(
+                exchange.explanation,
+                to: rendered,
+                sourceSegments: &richSourceSegments
+            )
         }
 
         if let pendingRequest, !pendingRequest.isEmpty {
@@ -516,6 +534,13 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         }
 
         transcriptView.textStorage?.setAttributedString(rendered)
+        transcriptView.sourceSegments = richSourceSegments
+        let viewportHeight = transcriptScrollView.contentView.bounds.height
+        let contentHeight = NativeTextViewLayout.fitDocumentView(
+            transcriptView,
+            minimumHeight: viewportHeight
+        )
+        transcriptScrollView.hasVerticalScroller = contentHeight > viewportHeight + 0.5
         switch transcriptScrollTarget {
         case .top:
             scrollTranscriptToTop()
@@ -542,8 +567,9 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
 
     @discardableResult
     private func appendAssistantText(
-        _ text: String,
-        to rendered: NSMutableAttributedString
+        _ document: AIOutputDocument,
+        to rendered: NSMutableAttributedString,
+        sourceSegments: inout [RichTranscriptSourceSegment]
     ) -> NSRange {
         let start = rendered.length
         let paragraph = NSMutableParagraphStyle()
@@ -555,7 +581,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         paragraph.tailIndent = -18
         rendered.append(
             NSAttributedString(
-                string: "Explain\u{2028}",
+                string: "Explain\n",
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
                     .foregroundColor: ShortcutUIStyle.secondaryTextColor,
@@ -563,14 +589,22 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
                 ]
             )
         )
+        let richOutput = richTextRenderer.render(document)
+        let contentStart = rendered.length
+        rendered.append(richOutput.attributedString)
+        sourceSegments.append(
+            RichTranscriptSourceSegment(
+                renderedRange: NSRange(
+                    location: contentStart,
+                    length: richOutput.attributedString.length
+                ),
+                payload: richOutput.clipboardPayload
+            )
+        )
         rendered.append(
             NSAttributedString(
-                string: "\(compactParagraphs(in: text))\n",
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 15),
-                    .foregroundColor: ShortcutUIStyle.primaryTextColor,
-                    .paragraphStyle: paragraph,
-                ]
+                string: "\n",
+                attributes: [.paragraphStyle: paragraph]
             )
         )
         return NSRange(location: start, length: rendered.length - start)
@@ -661,7 +695,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         paragraph.lineSpacing = 4
         rendered.append(
             NSAttributedString(
-                string: "You\u{2028}",
+                string: "You\n",
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
                     .foregroundColor: ShortcutUIStyle.accentColor,
@@ -698,7 +732,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         paragraph.tailIndent = -18
         rendered.append(
             NSAttributedString(
-                string: "Explain\u{2028}",
+                string: "Explain\n",
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
                     .foregroundColor: ShortcutUIStyle.secondaryTextColor,
@@ -719,12 +753,6 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         return NSRange(location: start, length: rendered.length - start)
     }
 
-    private func compactParagraphs(in text: String) -> String {
-        text
-            .components(separatedBy: .newlines)
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            .joined(separator: "\n")
-    }
 }
 
 private struct ExplainPastedImage {
@@ -748,6 +776,26 @@ private struct ExplainPastedImage {
         }
         self.pngData = pngData
         preview = image
+    }
+}
+
+private struct RichTranscriptSourceSegment {
+    let renderedRange: NSRange
+    let payload: RichClipboardPayload
+}
+
+private final class RichTranscriptTextView: NSTextView {
+    var sourceSegments: [RichTranscriptSourceSegment] = []
+
+    override func copy(_ sender: Any?) {
+        let selection = selectedRange()
+        if let segment = sourceSegments.first(where: {
+            NSEqualRanges($0.renderedRange, selection)
+        }) {
+            segment.payload.write(to: NSPasteboard.general)
+            return
+        }
+        super.copy(sender)
     }
 }
 

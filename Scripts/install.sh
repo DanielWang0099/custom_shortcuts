@@ -9,12 +9,44 @@ CONTENTS_PATH="${APP_PATH}/Contents"
 MACOS_PATH="${CONTENTS_PATH}/MacOS"
 EXECUTABLE_NAME="AIShortcuts"
 BUNDLE_ID="com.susanawang.aishortcuts"
+KEYCHAIN_SERVICE="com.susanawang.aishortcuts.openai"
+KEYCHAIN_ACCOUNT="default"
+KEY_SOURCE_PATH="${HOME}/Documents/GitHub/japanese-practice/vocabulary-flashcard-practice/.env.local"
 AGENT_LABEL="com.susanawang.aishortcuts"
 AGENT_PATH="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"
 AGENT_TARGET="gui/${UID}/${AGENT_LABEL}"
 
 cd "${PROJECT_DIR}"
+
+# A rebuilt local app has a new ad-hoc code signature. Require the configured
+# source key before replacing the old Keychain item, so an install cannot erase
+# the only usable credential when the source file is missing or malformed.
+if [[ ! -f "${KEY_SOURCE_PATH}" ]]; then
+  print "The configured API key source is unavailable."
+  exit 1
+fi
+API_KEY=$(/usr/bin/awk '
+  /^[[:space:]]*(export[[:space:]]+)?OPENAI_API_KEY[[:space:]]*=/ {
+    value=$0
+    sub(/^[^=]*=/, "", value)
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+    if ((substr(value,1,1)=="\"" && substr(value,length(value),1)=="\"") ||
+        (substr(value,1,1)=="\047" && substr(value,length(value),1)=="\047")) {
+      value=substr(value,2,length(value)-2)
+    }
+    print value
+    exit
+  }
+' "${KEY_SOURCE_PATH}")
+if [[ ${#API_KEY} -le 20 ]]; then
+  unset API_KEY
+  print "The configured API key is missing or invalid."
+  exit 1
+fi
+unset API_KEY
+
 swift run AIShortcutsCoreChecks
+swift run AIShortcutsRenderingChecks
 swift build -c release --product AIShortcuts
 BIN_PATH=$(swift build -c release --show-bin-path)
 
@@ -96,6 +128,14 @@ tccutil reset Accessibility "${BUNDLE_ID}"
 tccutil reset ScreenCapture "${BUNDLE_ID}"
 tccutil reset AppleEvents "${BUNDLE_ID}"
 defaults write "${BUNDLE_ID}" permissionsRequested.v1 -bool false
+
+# Rebuilding changes the ad-hoc signature, so an existing generic-password
+# item can retain an ACL for the previous executable. Remove only this app's
+# item; the newly launched app re-imports the validated source key and creates
+# a fresh ACL for its current signature.
+/usr/bin/security delete-generic-password \
+  -s "${KEYCHAIN_SERVICE}" \
+  -a "${KEYCHAIN_ACCOUNT}" >/dev/null 2>&1 || true
 
 launchctl bootstrap "gui/${UID}" "${AGENT_PATH}"
 launchctl kickstart -k "${AGENT_TARGET}"

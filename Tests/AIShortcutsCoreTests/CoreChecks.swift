@@ -28,7 +28,13 @@ struct CoreChecks {
         var failures = 0
 
         failures += await run("key source parsing", keySourceParsing)
+        failures += await run("AI output contracts", outputContractChecks)
+        failures += await run("math syntax contracts", mathSyntaxChecks)
+        failures += await run("structured AI output parsing", structuredOutputChecks)
         failures += await run("prompt and replacement policies", promptAndPolicyChecks)
+        failures += await run("status menu headlines", statusMenuHeadlineChecks)
+        failures += await run("calculate result presentation", calculateResultPresentationChecks)
+        failures += await run("calculate result dismissal", calculateResultDismissalChecks)
         failures += await run("explanation conversation memory", explanationMemoryChecks)
         failures += await run("sequential clipboard FIFO", sequentialClipboardChecks)
         failures += await run("sequential clipboard cross-window capture", sequentialClipboardCaptureChecks)
@@ -85,6 +91,237 @@ struct CoreChecks {
             )
             throw CheckFailure(description: "Missing key did not fail closed.")
         } catch KeySourceError.missingKey {
+            // Expected.
+        }
+    }
+
+    private static func outputContractChecks() async throws {
+        let plainSource = "Price: $5.00\nVisible *asterisks* stay literal."
+        let markdownSource = "# Result\n\n- Total: \\(x^2\\)"
+        try expect(
+            AIOutputFormatDetector.detect(plainSource) == .plainText,
+            "Plain text with currency and literal punctuation was misclassified."
+        )
+        try expect(
+            AIOutputFormatDetector.detect(markdownSource) == .markdown,
+            "Markdown with a list and math was not detected."
+        )
+
+        let document = AIOutputDocument(
+            format: .markdown,
+            source: "  # Result\r\n\r\nValue: \\(x^2\\)  "
+        )
+        try expect(
+            document.source == "# Result\n\nValue: \\(x^2\\)",
+            "AI output documents did not normalize source text."
+        )
+        let separatedDocument = AIOutputDocument(
+            format: .markdown,
+            source: "First\u{2028}Second\u{2029}Third"
+        )
+        try expect(
+            separatedDocument.source == "First\nSecond\nThird",
+            "AI output documents did not normalize Unicode line separators."
+        )
+
+        try expect(
+            AIOutputPolicy.allowedFormats(for: .ocr) == [.plainText]
+                && AIOutputPolicy.allowedFormats(
+                    for: .refine,
+                    selectedText: markdownSource
+                ) == [.markdown]
+                && AIOutputPolicy.allowedFormats(
+                    for: .translate,
+                    selectedText: plainSource
+                ) == [.plainText]
+                && AIOutputPolicy.allowedFormats(
+                    for: .format,
+                    parameter: "concise email with bullets"
+                ) == [.markdown]
+                && AIOutputPolicy.allowedFormats(
+                    for: .format,
+                    parameter: "fix typos"
+                ) == [.plainText]
+                && AIOutputPolicy.allowedFormats(for: .explain) == [.plainText, .markdown]
+                && AIOutputPolicy.allowedFormats(for: .calculate) == [.plainText, .markdown],
+            "Action output format policy did not match the guarded matrix."
+        )
+
+        let ocr = PromptBuilder.make(action: .ocr)
+        let refine = PromptBuilder.make(action: .refine, selectedText: markdownSource)
+        let format = PromptBuilder.make(
+            action: .format,
+            selectedText: "Hello",
+            parameter: "email with bullets"
+        )
+        let explain = PromptBuilder.make(action: .explain, parameter: "Explain this")
+        try expect(
+            ocr.outputSchema == .textDocument
+                && ocr.allowedOutputFormats == [.plainText]
+                && refine.outputSchema == .textDocument
+                && refine.allowedOutputFormats == [.markdown]
+                && format.outputSchema == .textDocument
+                && format.allowedOutputFormats == [.markdown]
+                && explain.outputSchema == .textDocument
+                && explain.allowedOutputFormats == [.plainText, .markdown],
+            "Prompts did not carry their strict document output contracts."
+        )
+        let calculated = PromptBuilder.make(action: .calculate)
+        try expect(
+            explain.instructions.contains("Use format markdown whenever")
+                && calculated.instructions.contains("only when no formatting or math delimiters are needed"),
+            "Explain and Calculate did not require Markdown for formatted or mathematical answers."
+        )
+    }
+
+    private static func mathSyntaxChecks() async throws {
+        let source = "Cost $5.00 and \\(x^2 + \\frac{1}{2}\\) plus $$\\sqrt{x}$$ and `\\(not math\\)`.\n```\n\\[code\\]\n```"
+        let spans = MathSyntax.mathSpans(in: source)
+        try expect(
+            spans.count == 2
+                && spans[0].source == "\\(x^2 + \\frac{1}{2}\\)"
+                && !spans[0].isDisplay
+                && spans[1].source == "$$\\sqrt{x}$$"
+                && spans[1].isDisplay,
+            "Math scanning interpreted currency or code content as equations."
+        )
+        try expect(
+            MathSyntax.hasUnclosedMathDelimiter(in: "Broken \\(x^2")
+                && MathSyntax.hasUnclosedMathDelimiter(in: "Broken $x^2")
+                && !MathSyntax.hasUnclosedMathDelimiter(in: "Price $5.00"),
+            "Malformed math delimiters were not distinguished from currency."
+        )
+        try expect(
+            MathSyntax.isSupportedExpression("x^2 + \\frac{1}{2} + \\sqrt{y}")
+                && MathSyntax.isSupportedExpression("\\alpha_1 + \\sum x")
+                && !MathSyntax.isSupportedExpression("\\begin{matrix}a & b\\end{matrix}"),
+            "The common native LaTeX grammar was not enforced."
+        )
+
+        let safe = AIOutputDocument(format: .markdown, source: "# Safe\n\n[OpenAI](https://openai.com)")
+        try AIOutputDocumentValidator.validate(safe)
+        do {
+            try AIOutputDocumentValidator.validate(
+                AIOutputDocument(format: .markdown, source: "<script>alert(1)</script>")
+            )
+            throw CheckFailure(description: "Raw HTML was accepted in Markdown output.")
+        } catch AIOutputValidationError.rawHTML {
+            // Expected.
+        }
+        do {
+            try AIOutputDocumentValidator.validate(
+                AIOutputDocument(format: .markdown, source: "![image](https://example.com/a.png)")
+            )
+            throw CheckFailure(description: "Embedded Markdown images were accepted.")
+        } catch AIOutputValidationError.embeddedImage {
+            // Expected.
+        }
+        do {
+            try AIOutputDocumentValidator.validate(
+                AIOutputDocument(format: .markdown, source: "[unsafe](<javascript:alert(1)>)")
+            )
+            throw CheckFailure(description: "Angle-bracket unsafe links were accepted.")
+        } catch AIOutputValidationError.unsafeLink {
+            // Expected.
+        }
+    }
+
+    private static func structuredOutputChecks() async throws {
+        let markdownPayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"markdown\",\"content\":\"# Result\\n\\n\\\\(x^2\\\\)\"}"}]}]}"##.utf8
+        )
+        let parsed = try ResponsesAPIClient.parseCompletion(
+            from: markdownPayload,
+            outputSchema: .textDocument,
+            allowedOutputFormats: [.markdown]
+        )
+        try expect(
+            parsed.output == AIOutputDocument(
+                format: .markdown,
+                source: "# Result\n\n\\(x^2\\)"
+            ),
+            "Structured Markdown output was not decoded into a typed document."
+        )
+
+        let disallowedPayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"markdown\",\"content\":\"answer\"}"}]}]}"##.utf8
+        )
+        do {
+            _ = try ResponsesAPIClient.parseCompletion(
+                from: disallowedPayload,
+                outputSchema: .textDocument,
+                allowedOutputFormats: [.plainText]
+            )
+            throw CheckFailure(description: "Disallowed output format was accepted.")
+        } catch ResponsesAPIError.invalidOutput {
+            // Expected.
+        }
+
+        let calculatePayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"markdown\",\"answer\":\"Total: $12.00\"}"}]}]}"##.utf8
+        )
+        let calculated = try ResponsesAPIClient.parseCompletion(
+            from: calculatePayload,
+            outputSchema: .calculateAnswer,
+            allowedOutputFormats: [.plainText, .markdown]
+        )
+        try expect(
+            calculated.output == AIOutputDocument(
+                format: .markdown,
+                source: "Total: $12.00"
+            ),
+            "Calculate answer output was not isolated from its JSON envelope."
+        )
+
+        let literalOCRPayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"plain_text\",\"content\":\"*literal* \\\\(x\\\\)\"}"}]}]}"##.utf8
+        )
+        let literalOCR = try ResponsesAPIClient.parseCompletion(
+            from: literalOCRPayload,
+            outputSchema: .textDocument,
+            allowedOutputFormats: [.plainText]
+        )
+        try expect(
+            literalOCR.output.format == .plainText
+                && literalOCR.output.source == "*literal* \\(x\\)",
+            "OCR plain text was interpreted as rich formatting instead of remaining literal."
+        )
+
+        let malformedEnvelopePayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"not-json"}]}]}"##.utf8
+        )
+        do {
+            _ = try ResponsesAPIClient.parseCompletion(
+                from: malformedEnvelopePayload,
+                outputSchema: .textDocument,
+                allowedOutputFormats: [.plainText]
+            )
+            throw CheckFailure(description: "Malformed document JSON was accepted.")
+        } catch ResponsesAPIError.invalidOutput {
+            // Expected.
+        }
+
+        let extraFieldPayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"plain_text\",\"content\":\"answer\",\"extra\":true}"}]}]}"##.utf8
+        )
+        do {
+            _ = try ResponsesAPIClient.parseCompletion(
+                from: extraFieldPayload,
+                outputSchema: .textDocument,
+                allowedOutputFormats: [.plainText]
+            )
+            throw CheckFailure(description: "Unknown envelope fields were accepted.")
+        } catch ResponsesAPIError.invalidOutput {
+            // Expected.
+        }
+
+        let incompletePayload = Data(
+            ##"{"status":"completed","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"plain_text\",\"content\":\"partial\"}"}]}]}"##.utf8
+        )
+        do {
+            _ = try ResponsesAPIClient.parseCompletion(from: incompletePayload)
+            throw CheckFailure(description: "Incomplete responses were accepted.")
+        } catch ResponsesAPIError.incomplete("max_output_tokens") {
             // Expected.
         }
     }
@@ -230,9 +467,14 @@ struct CoreChecks {
                 && calculated.instructions.contains("only the converted time ranges")
                 && calculated.instructions.contains("never copy")
                 && calculated.instructions.contains("truncated fragments")
-                && calculated.reasoningEffort == .low
+                && calculated.reasoningEffort == .high
+                && calculated.outputSchema == .calculateAnswer
                 && customCalculation.inputText.contains("Only list each item's extended price."),
             "Calculate did not preserve automatic and custom screenshot instructions."
+        )
+        try expect(
+            calculated.maxOutputTokens >= 25_000,
+            "High-reasoning Calculate needs enough output space for reasoning and the final answer."
         )
 
         try expect(
@@ -270,6 +512,107 @@ struct CoreChecks {
                 frontmostProcessIdentifier: 99
             ),
             "A different frontmost process must not receive replacement text."
+        )
+    }
+
+    private static func statusMenuHeadlineChecks() async throws {
+        try expect(
+            StatusMenuPresentation.headline(
+                busy: true,
+                enabled: true,
+                currentAction: "Calculate"
+            ) == "Working · Calculate",
+            "The status menu should identify the active shortcut while it is running."
+        )
+        try expect(
+            StatusMenuPresentation.headline(
+                busy: false,
+                enabled: true,
+                currentAction: nil
+            ) == "Ready for shortcuts",
+            "The status menu should return to Ready after an operation finishes."
+        )
+        try expect(
+            StatusMenuPresentation.headline(
+                busy: false,
+                enabled: false,
+                currentAction: nil
+            ) == "Setup required",
+            "The status menu should keep setup guidance when shortcuts are disabled."
+        )
+    }
+
+    private static func calculateResultPresentationChecks() async throws {
+        let jsonResult = #"{"answer": " 12 items\nTotal: $48.00 "}"#
+        try expect(
+            CalculateResultPresentation.displayText(for: jsonResult)
+                == "12 items\nTotal: $48.00",
+            "Calculate should unwrap the JSON answer envelope and trim surrounding whitespace."
+        )
+        try expect(
+            CalculateResultPresentation.clipboardText(for: jsonResult)
+                == "12 items\nTotal: $48.00",
+            "Calculate should copy the unwrapped answer instead of the JSON envelope."
+        )
+        try expect(
+            CalculateResultPresentation.displayText(for: " 12 items\nTotal: $48.00 \n")
+                == "12 items\nTotal: $48.00",
+            "Calculate should display a plain-text answer without surrounding whitespace."
+        )
+        try expect(
+            CalculateResultPresentation.displayText(for: #"{"reasoning": "summed the rows", "answer": "42"}"#)
+                == "42",
+            "Calculate must surface only the answer field, never reasoning."
+        )
+        try expect(
+            CalculateResultPresentation.displayText(for: #"{"answer": "  "}"#) == nil,
+            "Calculate should not display a blank JSON answer."
+        )
+        try expect(
+            CalculateResultPresentation.displayText(for: " \n\t") == nil,
+            "Calculate should not display an empty answer."
+        )
+    }
+
+    private static func calculateResultDismissalChecks() async throws {
+        try expect(
+            !CalculateResultDismissalPolicy.shouldDismiss(
+                initialMouseX: 150,
+                initialMouseY: 150,
+                currentMouseX: 150,
+                currentMouseY: 150,
+                panelMinX: 0,
+                panelMinY: 0,
+                panelWidth: 100,
+                panelHeight: 100
+            ),
+            "Calculate result should remain visible while the cursor is stationary."
+        )
+        try expect(
+            !CalculateResultDismissalPolicy.shouldDismiss(
+                initialMouseX: 150,
+                initialMouseY: 150,
+                currentMouseX: 50,
+                currentMouseY: 50,
+                panelMinX: 0,
+                panelMinY: 0,
+                panelWidth: 100,
+                panelHeight: 100
+            ),
+            "Calculate result should remain visible while the cursor is over the popup."
+        )
+        try expect(
+            CalculateResultDismissalPolicy.shouldDismiss(
+                initialMouseX: 150,
+                initialMouseY: 150,
+                currentMouseX: 250,
+                currentMouseY: 150,
+                panelMinX: 0,
+                panelMinY: 0,
+                panelWidth: 100,
+                panelHeight: 100
+            ),
+            "Calculate result should dismiss after the cursor moves outside the popup."
         )
     }
 
@@ -461,26 +804,29 @@ struct CoreChecks {
             timeZone: TimeZone(secondsFromGMT: 0)!
         )
         try expect(
-            builtIns.count == 5
+            builtIns.count == 2
                 && builtIns.allSatisfy(\.builtIn)
-                && InsertEntryMatcher.exactMatch(for: "today", in: builtIns)?.key
-                    == "Current Date"
-                && InsertEntryMatcher.exactMatch(for: "epoch", in: builtIns)?.key
-                    == "Unix Timestamp",
-            "Dynamic Insert defaults or their local aliases are unavailable."
+                && builtIns.map(\.key) == ["Date", "Time"]
+                && InsertEntryMatcher.exactMatch(for: "date", in: builtIns)?.key
+                    == "Date"
+                && InsertEntryMatcher.exactMatch(for: "time", in: builtIns)?.key
+                    == "Time"
+                && InsertEntryMatcher.exactMatch(for: "timestamp", in: builtIns) == nil
+                && InsertEntryMatcher.exactMatch(for: "epoch", in: builtIns) == nil,
+            "Insert should expose only Date and Time dynamic defaults."
         )
         try expect(
-            InsertBuiltIns.conflicts(with: "current-date")
-                && InsertBuiltIns.conflicts(with: "Today")
-                && InsertBuiltIns.conflicts(with: "ISO Timestamp")
+            InsertBuiltIns.conflicts(with: "Date")
+                && InsertBuiltIns.conflicts(with: "time")
+                && !InsertBuiltIns.conflicts(with: "current-date")
+                && !InsertBuiltIns.conflicts(with: "ISO Timestamp")
                 && !InsertBuiltIns.conflicts(with: "Primary Email"),
-            "Dynamic insertion names were not correctly reserved from custom entries."
+            "Only Date and Time should be reserved from custom entries."
         )
         try expect(
-            builtIns.first(where: { $0.key == "Current Date" })?.value == "2026-08-10"
-                && builtIns.first(where: { $0.key == "Unix Timestamp" })?.value
-                    == String(Int(fixedDate.timeIntervalSince1970)),
-            "Dynamic insertion values were not generated from the invocation time."
+            builtIns.first(where: { $0.key == "Date" })?.value == "2026-08-10"
+                && builtIns.first(where: { $0.key == "Time" })?.value == "00:00:00",
+            "Date and Time values were not generated from the invocation time."
         )
     }
 
@@ -578,13 +924,45 @@ struct CoreChecks {
         )
         try expect(
             (calculateJSON["reasoning"] as? [String: Any])?["effort"] as? String
-                == "low",
-            "Calculate should use low reasoning."
+                == "high",
+            "Calculate should use high reasoning."
+        )
+        let calculateText = try require(
+            calculateJSON["text"] as? [String: Any],
+            "Calculate text options were missing."
+        )
+        let calculateFormat = try require(
+            calculateText["format"] as? [String: Any],
+            "Calculate JSON schema format was missing."
+        )
+        let calculateSchema = try require(
+            calculateFormat["schema"] as? [String: Any],
+            "Calculate schema body was missing."
+        )
+        let schemaProperties = try require(
+            calculateSchema["properties"] as? [String: Any],
+            "Calculate schema properties were missing."
+        )
+        try expect(
+            calculateFormat["type"] as? String == "json_schema"
+                && calculateFormat["strict"] as? Bool == true
+                && (calculateSchema["required"] as? [String]) == ["format", "answer"]
+                && schemaProperties["format"] != nil
+                && schemaProperties["answer"] != nil,
+            "Calculate must enforce a strict JSON answer schema."
+        )
+        let plainText = try require(
+            translationJSON["text"] as? [String: Any],
+            "Translation text options were missing."
+        )
+        try expect(
+            (plainText["format"] as? [String: Any])?["type"] as? String == "json_schema",
+            "Normal AI shortcuts must send a strict JSON document schema."
         )
     }
 
     private static func mockedSuccessCheck() async throws {
-        let payload = """
+        let payload = #"""
         {
           "status": "completed",
           "model": "gpt-5.4-2026-03-05",
@@ -592,12 +970,12 @@ struct CoreChecks {
             {"type": "reasoning", "id": "reasoning-test"},
             {
               "type": "message",
-              "content": [{"type": "output_text", "text": "Corrected text."}]
+              "content": [{"type": "output_text", "text": "{\"format\":\"plain_text\",\"content\":\"Corrected text.\"}"}]
             }
           ],
           "usage": {"input_tokens": 10, "output_tokens": 3, "total_tokens": 13}
         }
-        """.data(using: .utf8)!
+        """#.data(using: .utf8)!
         let client = ResponsesAPIClient(
             transport: MockTransport { request in
                 let response = HTTPURLResponse(
@@ -632,18 +1010,18 @@ struct CoreChecks {
 
         let retryCounter = AttemptCounter()
         let recoveredPayload = Data(
-            """
+            #"""
             {
               "status": "completed",
               "model": "gpt-5.4-2026-03-05",
               "output": [
                 {
                   "type": "message",
-                  "content": [{"type": "output_text", "text": "Recovered."}]
+                  "content": [{"type": "output_text", "text": "{\"format\":\"plain_text\",\"content\":\"Recovered.\"}"}]
                 }
               ]
             }
-            """.utf8
+            """#.utf8
         )
         let retryingClient = ResponsesAPIClient(
             transport: MockTransport { request in
