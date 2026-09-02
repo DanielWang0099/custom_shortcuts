@@ -219,7 +219,7 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
         case .calculate:
             return (
                 "Crop visual data and optionally describe the calculation or extraction you need.",
-                "Result · Copies only the concise useful answer, without unnecessary explanation.",
+                "Result · Shows the concise useful answer in a popup that stays until the cursor moves away, and copies only the answer.",
                 "Screen Recording + OpenAI"
             )
         case .inputLock:

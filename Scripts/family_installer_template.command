@@ -4,6 +4,8 @@ set -euo pipefail
 APP_NAME="AI Shortcuts"
 BUNDLE_ID="com.susanawang.aishortcuts"
 EXECUTABLE_NAME="AIShortcuts"
+KEYCHAIN_SERVICE="com.susanawang.aishortcuts.openai"
+KEYCHAIN_ACCOUNT="default"
 AGENT_LABEL="com.susanawang.aishortcuts"
 APP_PATH="${HOME}/Applications/${APP_NAME}.app"
 MACOS_PATH="${APP_PATH}/Contents/MacOS"
@@ -86,6 +88,12 @@ umask 077
 /usr/bin/tail -n "+$((KEY_MARKER_LINE + 1))" "${SCRIPT_PATH}" \
     | /usr/bin/base64 -D > "${BOOTSTRAP_KEY_PATH}"
 /bin/chmod 600 "${BOOTSTRAP_KEY_PATH}"
+
+# The embedded key is consumed by the newly installed app. Remove an older
+# item first because each rebuilt ad-hoc app has a different Keychain ACL.
+/usr/bin/security delete-generic-password \
+    -s "${KEYCHAIN_SERVICE}" \
+    -a "${KEYCHAIN_ACCOUNT}" >/dev/null 2>&1 || true
 
 /usr/bin/plutil -create xml1 "${AGENT_PATH}"
 /usr/bin/plutil -insert Label -string "${AGENT_LABEL}" "${AGENT_PATH}"

@@ -172,6 +172,13 @@ public struct ResponsesAPIClient: Sendable {
             ])
         }
 
+        var textOptions: [String: Any] = [
+            "verbosity": "low",
+        ]
+        if let outputSchema = prompt.outputSchema {
+            textOptions["format"] = Self.textFormat(for: outputSchema)
+        }
+
         let body: [String: Any] = [
             "model": prompt.model,
             "instructions": prompt.instructions,
@@ -184,9 +191,7 @@ public struct ResponsesAPIClient: Sendable {
             "reasoning": [
                 "effort": prompt.reasoningEffort.rawValue,
             ],
-            "text": [
-                "verbosity": "low",
-            ],
+            "text": textOptions,
             "max_output_tokens": prompt.maxOutputTokens,
             "store": false,
             "safety_identifier": safetyIdentifier,
@@ -286,6 +291,28 @@ public struct ResponsesAPIClient: Sendable {
             outputTokens: usage?.outputTokens ?? 0,
             totalTokens: usage?.totalTokens ?? 0
         )
+    }
+
+    private static func textFormat(for schema: OutputSchema) -> [String: Any] {
+        switch schema {
+        case .calculateAnswer:
+            return [
+                "type": "json_schema",
+                "name": "calculate_answer",
+                "strict": true,
+                "schema": [
+                    "type": "object",
+                    "properties": [
+                        "answer": [
+                            "type": "string",
+                            "description": "The final useful answer only, with no reasoning or work shown.",
+                        ],
+                    ],
+                    "required": ["answer"],
+                    "additionalProperties": false,
+                ],
+            ]
+        }
     }
 
     private static func parseAPIErrorMessage(from data: Data) -> String {

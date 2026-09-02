@@ -29,6 +29,9 @@ struct CoreChecks {
 
         failures += await run("key source parsing", keySourceParsing)
         failures += await run("prompt and replacement policies", promptAndPolicyChecks)
+        failures += await run("status menu headlines", statusMenuHeadlineChecks)
+        failures += await run("calculate result presentation", calculateResultPresentationChecks)
+        failures += await run("calculate result dismissal", calculateResultDismissalChecks)
         failures += await run("explanation conversation memory", explanationMemoryChecks)
         failures += await run("sequential clipboard FIFO", sequentialClipboardChecks)
         failures += await run("sequential clipboard cross-window capture", sequentialClipboardCaptureChecks)
@@ -230,9 +233,14 @@ struct CoreChecks {
                 && calculated.instructions.contains("only the converted time ranges")
                 && calculated.instructions.contains("never copy")
                 && calculated.instructions.contains("truncated fragments")
-                && calculated.reasoningEffort == .low
+                && calculated.reasoningEffort == .high
+                && calculated.outputSchema == .calculateAnswer
                 && customCalculation.inputText.contains("Only list each item's extended price."),
             "Calculate did not preserve automatic and custom screenshot instructions."
+        )
+        try expect(
+            calculated.maxOutputTokens >= 25_000,
+            "High-reasoning Calculate needs enough output space for reasoning and the final answer."
         )
 
         try expect(
@@ -270,6 +278,107 @@ struct CoreChecks {
                 frontmostProcessIdentifier: 99
             ),
             "A different frontmost process must not receive replacement text."
+        )
+    }
+
+    private static func statusMenuHeadlineChecks() async throws {
+        try expect(
+            StatusMenuPresentation.headline(
+                busy: true,
+                enabled: true,
+                currentAction: "Calculate"
+            ) == "Working · Calculate",
+            "The status menu should identify the active shortcut while it is running."
+        )
+        try expect(
+            StatusMenuPresentation.headline(
+                busy: false,
+                enabled: true,
+                currentAction: nil
+            ) == "Ready for shortcuts",
+            "The status menu should return to Ready after an operation finishes."
+        )
+        try expect(
+            StatusMenuPresentation.headline(
+                busy: false,
+                enabled: false,
+                currentAction: nil
+            ) == "Setup required",
+            "The status menu should keep setup guidance when shortcuts are disabled."
+        )
+    }
+
+    private static func calculateResultPresentationChecks() async throws {
+        let jsonResult = #"{"answer": " 12 items\nTotal: $48.00 "}"#
+        try expect(
+            CalculateResultPresentation.displayText(for: jsonResult)
+                == "12 items\nTotal: $48.00",
+            "Calculate should unwrap the JSON answer envelope and trim surrounding whitespace."
+        )
+        try expect(
+            CalculateResultPresentation.clipboardText(for: jsonResult)
+                == "12 items\nTotal: $48.00",
+            "Calculate should copy the unwrapped answer instead of the JSON envelope."
+        )
+        try expect(
+            CalculateResultPresentation.displayText(for: " 12 items\nTotal: $48.00 \n")
+                == "12 items\nTotal: $48.00",
+            "Calculate should display a plain-text answer without surrounding whitespace."
+        )
+        try expect(
+            CalculateResultPresentation.displayText(for: #"{"reasoning": "summed the rows", "answer": "42"}"#)
+                == "42",
+            "Calculate must surface only the answer field, never reasoning."
+        )
+        try expect(
+            CalculateResultPresentation.displayText(for: #"{"answer": "  "}"#) == nil,
+            "Calculate should not display a blank JSON answer."
+        )
+        try expect(
+            CalculateResultPresentation.displayText(for: " \n\t") == nil,
+            "Calculate should not display an empty answer."
+        )
+    }
+
+    private static func calculateResultDismissalChecks() async throws {
+        try expect(
+            !CalculateResultDismissalPolicy.shouldDismiss(
+                initialMouseX: 150,
+                initialMouseY: 150,
+                currentMouseX: 150,
+                currentMouseY: 150,
+                panelMinX: 0,
+                panelMinY: 0,
+                panelWidth: 100,
+                panelHeight: 100
+            ),
+            "Calculate result should remain visible while the cursor is stationary."
+        )
+        try expect(
+            !CalculateResultDismissalPolicy.shouldDismiss(
+                initialMouseX: 150,
+                initialMouseY: 150,
+                currentMouseX: 50,
+                currentMouseY: 50,
+                panelMinX: 0,
+                panelMinY: 0,
+                panelWidth: 100,
+                panelHeight: 100
+            ),
+            "Calculate result should remain visible while the cursor is over the popup."
+        )
+        try expect(
+            CalculateResultDismissalPolicy.shouldDismiss(
+                initialMouseX: 150,
+                initialMouseY: 150,
+                currentMouseX: 250,
+                currentMouseY: 150,
+                panelMinX: 0,
+                panelMinY: 0,
+                panelWidth: 100,
+                panelHeight: 100
+            ),
+            "Calculate result should dismiss after the cursor moves outside the popup."
         )
     }
 
@@ -461,26 +570,29 @@ struct CoreChecks {
             timeZone: TimeZone(secondsFromGMT: 0)!
         )
         try expect(
-            builtIns.count == 5
+            builtIns.count == 2
                 && builtIns.allSatisfy(\.builtIn)
-                && InsertEntryMatcher.exactMatch(for: "today", in: builtIns)?.key
-                    == "Current Date"
-                && InsertEntryMatcher.exactMatch(for: "epoch", in: builtIns)?.key
-                    == "Unix Timestamp",
-            "Dynamic Insert defaults or their local aliases are unavailable."
+                && builtIns.map(\.key) == ["Date", "Time"]
+                && InsertEntryMatcher.exactMatch(for: "date", in: builtIns)?.key
+                    == "Date"
+                && InsertEntryMatcher.exactMatch(for: "time", in: builtIns)?.key
+                    == "Time"
+                && InsertEntryMatcher.exactMatch(for: "timestamp", in: builtIns) == nil
+                && InsertEntryMatcher.exactMatch(for: "epoch", in: builtIns) == nil,
+            "Insert should expose only Date and Time dynamic defaults."
         )
         try expect(
-            InsertBuiltIns.conflicts(with: "current-date")
-                && InsertBuiltIns.conflicts(with: "Today")
-                && InsertBuiltIns.conflicts(with: "ISO Timestamp")
+            InsertBuiltIns.conflicts(with: "Date")
+                && InsertBuiltIns.conflicts(with: "time")
+                && !InsertBuiltIns.conflicts(with: "current-date")
+                && !InsertBuiltIns.conflicts(with: "ISO Timestamp")
                 && !InsertBuiltIns.conflicts(with: "Primary Email"),
-            "Dynamic insertion names were not correctly reserved from custom entries."
+            "Only Date and Time should be reserved from custom entries."
         )
         try expect(
-            builtIns.first(where: { $0.key == "Current Date" })?.value == "2026-08-10"
-                && builtIns.first(where: { $0.key == "Unix Timestamp" })?.value
-                    == String(Int(fixedDate.timeIntervalSince1970)),
-            "Dynamic insertion values were not generated from the invocation time."
+            builtIns.first(where: { $0.key == "Date" })?.value == "2026-08-10"
+                && builtIns.first(where: { $0.key == "Time" })?.value == "00:00:00",
+            "Date and Time values were not generated from the invocation time."
         )
     }
 
@@ -578,8 +690,39 @@ struct CoreChecks {
         )
         try expect(
             (calculateJSON["reasoning"] as? [String: Any])?["effort"] as? String
-                == "low",
-            "Calculate should use low reasoning."
+                == "high",
+            "Calculate should use high reasoning."
+        )
+        let calculateText = try require(
+            calculateJSON["text"] as? [String: Any],
+            "Calculate text options were missing."
+        )
+        let calculateFormat = try require(
+            calculateText["format"] as? [String: Any],
+            "Calculate JSON schema format was missing."
+        )
+        let calculateSchema = try require(
+            calculateFormat["schema"] as? [String: Any],
+            "Calculate schema body was missing."
+        )
+        let schemaProperties = try require(
+            calculateSchema["properties"] as? [String: Any],
+            "Calculate schema properties were missing."
+        )
+        try expect(
+            calculateFormat["type"] as? String == "json_schema"
+                && calculateFormat["strict"] as? Bool == true
+                && (calculateSchema["required"] as? [String]) == ["answer"]
+                && schemaProperties["answer"] != nil,
+            "Calculate must enforce a strict JSON answer schema."
+        )
+        let plainText = try require(
+            translationJSON["text"] as? [String: Any],
+            "Translation text options were missing."
+        )
+        try expect(
+            plainText["format"] == nil,
+            "Non-calculate shortcuts must not send a JSON schema."
         )
     }
 

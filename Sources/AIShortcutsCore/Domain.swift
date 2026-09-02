@@ -80,6 +80,7 @@ public enum AppConstants {
     public static let fullDailyBudgetLimit = 1_000_000
     public static let budgetSafetyMargin = 2_048
     public static let maximumOutputTokens = 8_192
+    public static let calculationMaximumOutputTokens = 32_768
 
     public static func model(for action: AIShortcutAction) -> String {
         fullModel
@@ -92,19 +93,22 @@ public struct PromptSpec: Equatable, Sendable {
     public let inputText: String
     public let maxOutputTokens: Int
     public let reasoningEffort: ReasoningEffort
+    public let outputSchema: OutputSchema?
 
     public init(
         action: AIShortcutAction,
         instructions: String,
         inputText: String,
         maxOutputTokens: Int,
-        reasoningEffort: ReasoningEffort = .none
+        reasoningEffort: ReasoningEffort = .none,
+        outputSchema: OutputSchema? = nil
     ) {
         self.action = action
         self.instructions = instructions
         self.inputText = inputText
         self.maxOutputTokens = maxOutputTokens
         self.reasoningEffort = reasoningEffort
+        self.outputSchema = outputSchema
     }
 
     public var model: String {
@@ -115,6 +119,11 @@ public struct PromptSpec: Equatable, Sendable {
 public enum ReasoningEffort: String, Equatable, Sendable {
     case none
     case low
+    case high
+}
+
+public enum OutputSchema: String, Equatable, Sendable {
+    case calculateAnswer
 }
 
 public enum PromptBuilder {
@@ -226,12 +235,16 @@ public enum PromptBuilder {
                 currency or unit conversions, return the converted values and target units; include rates or assumptions \
                 only when the user asks or accuracy requires disclosure. For tables or random numbers, use the surrounding \
                 app context to choose the most useful extraction, calculation, or comparison. Be accurate and decisive. \
-                Do not show work, repeat the input, provide commentary, add a preamble, or claim to change the app. Return \
-                only the final useful answer.
+                Do not show work, repeat the input, provide commentary, add a preamble, or claim to change the app. \
+                Put the final useful answer only in the JSON answer field; never expose reasoning or intermediate work.
                 """,
                 inputText: requestText,
-                maxOutputTokens: textOutputLimit(for: requestText),
-                reasoningEffort: .low
+                // Reasoning tokens count against max_output_tokens, so high
+                // effort needs the full output budget; the JSON schema keeps
+                // the final answer itself short.
+                maxOutputTokens: AppConstants.calculationMaximumOutputTokens,
+                reasoningEffort: .high,
+                outputSchema: .calculateAnswer
             )
         case .finderPath:
             // The Finder Path shortcut runs entirely locally via AppleScript and

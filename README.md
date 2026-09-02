@@ -7,7 +7,7 @@ A lightweight native menu-bar utility that sends deliberately selected content t
 | Shortcut | Action | Result |
 | --- | --- | --- |
 | Control–Option–Command–4 | Select a cropped screenshot and run AI OCR | OCR text is copied |
-| Control–Option–Command–= | Select a cropped screenshot and calculate the most useful operation | Optional instruction is shown; the result is copied |
+| Control–Option–Command–= | Select a cropped screenshot and calculate the most useful operation | Optional instruction is shown; the answer popup stays until you move the cursor away from it and is copied |
 | Control–Option–Command–R | Refine selected text without changing its meaning | Result is copied and replaces an unchanged selection |
 | Control–Option–Command–T | Translate selected text using the instruction typed into the blank field | Result is copied only |
 | Control–Option–Command–F | Reformat selected text using the instruction typed into the blank field | Result is copied and replaces an unchanged selection |
@@ -35,7 +35,7 @@ The file must contain `OPENAI_API_KEY`. The installer and application never prin
 
 On first launch:
 
-1. Grant Accessibility and Screen Recording permissions. Install/update resets this app's stale entries for both permissions before launching the rebuilt signature. macOS may require restarting the app after Screen Recording is granted.
+1. Grant Accessibility and Screen Recording permissions. Install/update resets this app's stale entries for both permissions and its rebuilt-signature Keychain item before launching the new app. macOS may require restarting the app after Screen Recording is granted.
 2. After the macOS permission flow and any required restart are complete, confirm in the OpenAI dashboard that the key's project is enrolled for complimentary daily tokens and input/output sharing is enabled.
 3. Read the disclosure and choose **I Confirm**. The app then imports the key into the macOS login Keychain.
 
@@ -47,13 +47,13 @@ The menu-bar sparkle provides permission status, API key status, the local budge
 
 ## Complimentary-token guard and privacy
 
-Every AI shortcut uses the pinned full `gpt-5.4-2026-03-05` snapshot with a shared 1,000,000-token local UTC-day guard. Immediate OCR, Refine, Translate, and Format requests keep reasoning at `none`; Explain and Calculate use `low`. Explain opens only from Control–Option–Command–E, keeps its composer and answers in one opaque, high-contrast borderless panel, closes when it loses focus, and continues an in-flight answer in the background. Its placeholder changes when selected text or pasted images are attached; hidden selected text is never rendered, while pasted images appear as removable thumbnails before submission. Explain keeps up to six recent exchanges in memory and starts a fresh chat after one hour of inactivity; image bytes are not retained in conversation history. The model matches the complimentary full-model pool shown for this account. There is no fallback model and no local OCR substitution.
+Every AI shortcut uses the pinned full `gpt-5.4-2026-03-05` snapshot with a shared 1,000,000-token local UTC-day guard. Immediate OCR, Refine, Translate, and Format requests keep reasoning at `none`; Explain uses `low`, and Calculate uses `high` with a strict JSON answer schema so the popup and clipboard receive only the final answer, never model reasoning. Explain opens only from Control–Option–Command–E, keeps its composer and answers in one opaque, high-contrast borderless panel, closes when it loses focus, and continues an in-flight answer in the background. Its placeholder changes when selected text or pasted images are attached; hidden selected text is never rendered, while pasted images appear as removable thumbnails before submission. Explain keeps up to six recent exchanges in memory and starts a fresh chat after one hour of inactivity; image bytes are not retained in conversation history. The model matches the complimentary full-model pool shown for this account. There is no fallback model and no local OCR substitution.
 
 Sequential Clipboard is entirely local. Each activation starts an empty in-memory queue, normal `⌘C` appends complete pasteboard items, the second Control–Option–Command–C switches to paste mode, and each normal `⌘V` consumes the next item. The final pasted item remains on the regular macOS clipboard after the queue empties. Quitting or crashing AI Shortcuts drops the temporary queue and event monitor automatically.
 
 Insert stores key/value entries in `~/Library/Application Support/com.susanawang.aishortcuts/insert-library.json` with owner-only file permissions. Exact and uniquely contained key matches are resolved locally. For an ambiguous or approximate request, only the saved key labels—not their values—are sent to OpenAI, which must return the index of one existing entry. Insert then returns to the app that was active when the panel opened, pastes the locally retrieved value, and restores the previous clipboard. `/new`, `/modify`, and `/delete` transform the same panel into focused management views.
 
-Insert also includes five non-editable entries marked **Dynamic**: Current Date (`YYYY-MM-DD`), Current Time (`HH:mm:ss`), Current Date & Time, Current Timestamp (ISO 8601), and Unix Timestamp. Their values are generated when Insert opens, not saved to disk. Their names and common aliases such as `today`, `now`, `timestamp`, and `epoch` are reserved so a custom entry cannot ambiguously replace a built-in.
+Insert also includes two non-editable entries marked **Dynamic**: Date (`YYYY-MM-DD`) and Time (`HH:mm:ss`). Their values are generated when Insert opens, not saved to disk. The names `date` and `time` are reserved so a custom entry cannot replace a built-in.
 
 The utility keeps its small native chat controller warm for immediate display, but bounds conversation data to 48 KB. It has no polling or repeating timers and uses approximately 0% CPU while idle. Network sessions are refreshed after idle gaps to avoid stale VPN connections, and a single interrupted connection is retried once without changing models or endpoints.
 

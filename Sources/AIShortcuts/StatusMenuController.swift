@@ -47,6 +47,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "AI Shortcuts")
         image?.isTemplate = true
         statusItem.button?.image = image
+        rebuildMenu()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -57,15 +58,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         let state = snapshot()
         menu.removeAllItems()
 
-        let headline: String
-        if state.busy {
-            headline = state.currentAction.map { "Working · \($0)" } ?? "Working…"
-        } else if state.enabled {
-            headline = "Ready for shortcuts"
-        } else {
-            headline = "Setup required"
-        }
-        menu.addItem(disabledItem(headline))
+        menu.addItem(disabledItem(StatusMenuPresentation.headline(
+            busy: state.busy,
+            enabled: state.enabled,
+            currentAction: state.currentAction
+        )))
         if state.busy {
             menu.addItem(actionItem(
                 "Cancel Current Operation",

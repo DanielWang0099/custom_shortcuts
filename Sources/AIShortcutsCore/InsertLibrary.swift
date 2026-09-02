@@ -41,9 +41,6 @@ public struct InsertEntry: Codable, Equatable, Identifiable, Sendable {
 public enum InsertBuiltIns {
     private static let dateID = UUID(uuidString: "a1a1a1a1-0001-4000-8000-000000000001")!
     private static let timeID = UUID(uuidString: "a1a1a1a1-0002-4000-8000-000000000002")!
-    private static let dateTimeID = UUID(uuidString: "a1a1a1a1-0003-4000-8000-000000000003")!
-    private static let isoTimestampID = UUID(uuidString: "a1a1a1a1-0004-4000-8000-000000000004")!
-    private static let unixTimestampID = UUID(uuidString: "a1a1a1a1-0005-4000-8000-000000000005")!
 
     public static func entries(
         now: Date = Date(),
@@ -51,50 +48,20 @@ public enum InsertBuiltIns {
     ) -> [InsertEntry] {
         let date = formatter("yyyy-MM-dd", timeZone: timeZone).string(from: now)
         let time = formatter("HH:mm:ss", timeZone: timeZone).string(from: now)
-        let dateTime = formatter("yyyy-MM-dd HH:mm:ss", timeZone: timeZone).string(from: now)
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.timeZone = timeZone
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return [
             InsertEntry(
                 id: dateID,
-                key: "Current Date",
+                key: "Date",
                 value: date,
                 updatedAt: now,
-                isBuiltIn: true,
-                aliases: ["Date", "Today", "Today's Date"]
+                isBuiltIn: true
             ),
             InsertEntry(
                 id: timeID,
-                key: "Current Time",
+                key: "Time",
                 value: time,
                 updatedAt: now,
-                isBuiltIn: true,
-                aliases: ["Time", "Time Now"]
-            ),
-            InsertEntry(
-                id: dateTimeID,
-                key: "Current Date & Time",
-                value: dateTime,
-                updatedAt: now,
-                isBuiltIn: true,
-                aliases: ["Date Time", "Datetime", "Now"]
-            ),
-            InsertEntry(
-                id: isoTimestampID,
-                key: "Current Timestamp",
-                value: isoFormatter.string(from: now),
-                updatedAt: now,
-                isBuiltIn: true,
-                aliases: ["Timestamp", "ISO Timestamp", "ISO Date"]
-            ),
-            InsertEntry(
-                id: unixTimestampID,
-                key: "Unix Timestamp",
-                value: String(Int(now.timeIntervalSince1970)),
-                updatedAt: now,
-                isBuiltIn: true,
-                aliases: ["Unix Time", "Epoch", "Epoch Time"]
+                isBuiltIn: true
             ),
         ]
     }

@@ -728,11 +728,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let completion = try await callAPI(prompt: prompt, imagePNGs: [capture.pngData])
-            guard !completion.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            guard let displayText = CalculateResultPresentation.clipboardText(for: completion.text) else {
                 throw ResponsesAPIError.missingOutput
             }
-            selectionService.placeOnClipboard(completion.text)
-            hud.showSuccess(text: "Calculated result copied")
+            selectionService.placeOnClipboard(displayText)
+            hud.showResult(text: displayText)
         } catch {
             guard !Task.isCancelled else {
                 return
