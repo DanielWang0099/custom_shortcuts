@@ -1159,7 +1159,7 @@ private final class MathExpressionParser {
         "psi": "ψ", "omega": "ω", "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ",
         "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π", "Sigma": "Σ", "Upsilon": "Υ",
         "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω", "sum": "∑", "prod": "∏",
-        "int": "∫", "oint": "∮", "times": "×", "cdot": "·", "pm": "±",
+        "int": "∫", "oint": "∮", "times": "×", "cdot": "·", "odot": "⊙", "pm": "±",
         "mp": "∓", "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥", "neq": "≠",
         "approx": "≈", "sim": "∼", "equiv": "≡", "infty": "∞", "partial": "∂",
         "nabla": "∇", "rightarrow": "→", "leftarrow": "←", "Rightarrow": "⇒",

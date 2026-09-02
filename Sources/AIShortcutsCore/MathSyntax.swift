@@ -276,7 +276,7 @@ public enum MathSyntax {
         "tau", "upsilon", "phi", "chi", "psi", "omega", "Gamma", "Delta",
         "Theta", "Lambda", "Xi", "Pi", "Sigma", "Upsilon", "Phi", "Psi", "Omega",
         "frac", "sqrt", "sum", "prod", "int", "oint", "times", "cdot", "pm",
-        "mp", "le", "leq", "ge", "geq", "neq", "approx", "sim", "equiv", "infty",
+        "mp", "le", "leq", "ge", "geq", "neq", "approx", "sim", "equiv", "infty", "odot",
         "partial", "nabla", "rightarrow", "leftarrow", "Rightarrow", "Leftarrow",
         "to", "in", "notin", "subset", "subseteq", "cup", "cap", "forall", "exists",
         "sin", "cos", "tan", "cot", "sec", "csc", "log", "ln", "exp", "lim",

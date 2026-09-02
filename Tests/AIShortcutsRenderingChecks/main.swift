@@ -103,6 +103,20 @@ struct RenderingChecks {
                 && rendered.clipboardPayload.rtfdData != nil,
             "Supported LaTeX was not rendered and exported with a source fallback."
         )
+
+        let backpropagation = """
+        Backpropagation computes gradients using the chain rule. For layer \\(l\\):
+
+        - Error term: \\[\\Delta^{(l)} = \\left((W^{(l+1)})^T \\Delta^{(l+1)}\\right) \\odot f'(z^{(l)})\\]
+        """
+        let backpropagationRendered = NativeRichTextRenderer().render(
+            AIOutputDocument(format: .markdown, source: backpropagation)
+        )
+        try expect(
+            backpropagationRendered.hasMathAttachments
+                && backpropagationRendered.fallbackMathSources.isEmpty,
+            "The backpropagation equation was incorrectly left as raw LaTeX."
+        )
     }
 
     private static func unsupportedMathFallbackCheck() throws {

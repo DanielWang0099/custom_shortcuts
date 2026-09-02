@@ -158,6 +158,12 @@ struct CoreChecks {
                 && explain.allowedOutputFormats == [.plainText, .markdown],
             "Prompts did not carry their strict document output contracts."
         )
+        let calculated = PromptBuilder.make(action: .calculate)
+        try expect(
+            explain.instructions.contains("Use format markdown whenever")
+                && calculated.instructions.contains("only when no formatting or math delimiters are needed"),
+            "Explain and Calculate did not require Markdown for formatted or mathematical answers."
+        )
     }
 
     private static func mathSyntaxChecks() async throws {
