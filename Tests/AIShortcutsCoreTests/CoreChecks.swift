@@ -28,6 +28,9 @@ struct CoreChecks {
         var failures = 0
 
         failures += await run("key source parsing", keySourceParsing)
+        failures += await run("AI output contracts", outputContractChecks)
+        failures += await run("math syntax contracts", mathSyntaxChecks)
+        failures += await run("structured AI output parsing", structuredOutputChecks)
         failures += await run("prompt and replacement policies", promptAndPolicyChecks)
         failures += await run("status menu headlines", statusMenuHeadlineChecks)
         failures += await run("calculate result presentation", calculateResultPresentationChecks)
@@ -90,6 +93,157 @@ struct CoreChecks {
         } catch KeySourceError.missingKey {
             // Expected.
         }
+    }
+
+    private static func outputContractChecks() async throws {
+        let plainSource = "Price: $5.00\nVisible *asterisks* stay literal."
+        let markdownSource = "# Result\n\n- Total: \\(x^2\\)"
+        try expect(
+            AIOutputFormatDetector.detect(plainSource) == .plainText,
+            "Plain text with currency and literal punctuation was misclassified."
+        )
+        try expect(
+            AIOutputFormatDetector.detect(markdownSource) == .markdown,
+            "Markdown with a list and math was not detected."
+        )
+
+        let document = AIOutputDocument(
+            format: .markdown,
+            source: "  # Result\r\n\r\nValue: \\(x^2\\)  "
+        )
+        try expect(
+            document.source == "# Result\n\nValue: \\(x^2\\)",
+            "AI output documents did not normalize source text."
+        )
+
+        try expect(
+            AIOutputPolicy.allowedFormats(for: .ocr) == [.plainText]
+                && AIOutputPolicy.allowedFormats(
+                    for: .refine,
+                    selectedText: markdownSource
+                ) == [.markdown]
+                && AIOutputPolicy.allowedFormats(
+                    for: .translate,
+                    selectedText: plainSource
+                ) == [.plainText]
+                && AIOutputPolicy.allowedFormats(
+                    for: .format,
+                    parameter: "concise email with bullets"
+                ) == [.markdown]
+                && AIOutputPolicy.allowedFormats(
+                    for: .format,
+                    parameter: "fix typos"
+                ) == [.plainText]
+                && AIOutputPolicy.allowedFormats(for: .explain) == [.plainText, .markdown]
+                && AIOutputPolicy.allowedFormats(for: .calculate) == [.plainText, .markdown],
+            "Action output format policy did not match the guarded matrix."
+        )
+
+        let ocr = PromptBuilder.make(action: .ocr)
+        let refine = PromptBuilder.make(action: .refine, selectedText: markdownSource)
+        let format = PromptBuilder.make(
+            action: .format,
+            selectedText: "Hello",
+            parameter: "email with bullets"
+        )
+        let explain = PromptBuilder.make(action: .explain, parameter: "Explain this")
+        try expect(
+            ocr.outputSchema == .textDocument
+                && ocr.allowedOutputFormats == [.plainText]
+                && refine.outputSchema == .textDocument
+                && refine.allowedOutputFormats == [.markdown]
+                && format.outputSchema == .textDocument
+                && format.allowedOutputFormats == [.markdown]
+                && explain.outputSchema == .textDocument
+                && explain.allowedOutputFormats == [.plainText, .markdown],
+            "Prompts did not carry their strict document output contracts."
+        )
+    }
+
+    private static func mathSyntaxChecks() async throws {
+        let source = "Cost $5.00 and \\(x^2 + \\frac{1}{2}\\) plus $$\\sqrt{x}$$ and `\\(not math\\)`.\n```\n\\[code\\]\n```"
+        let spans = MathSyntax.mathSpans(in: source)
+        try expect(
+            spans.count == 2
+                && spans[0].source == "\\(x^2 + \\frac{1}{2}\\)"
+                && !spans[0].isDisplay
+                && spans[1].source == "$$\\sqrt{x}$$"
+                && spans[1].isDisplay,
+            "Math scanning interpreted currency or code content as equations."
+        )
+        try expect(
+            MathSyntax.isSupportedExpression("x^2 + \\frac{1}{2} + \\sqrt{y}")
+                && MathSyntax.isSupportedExpression("\\alpha_1 + \\sum x")
+                && !MathSyntax.isSupportedExpression("\\begin{matrix}a & b\\end{matrix}"),
+            "The common native LaTeX grammar was not enforced."
+        )
+
+        let safe = AIOutputDocument(format: .markdown, source: "# Safe\n\n[OpenAI](https://openai.com)")
+        try AIOutputDocumentValidator.validate(safe)
+        do {
+            try AIOutputDocumentValidator.validate(
+                AIOutputDocument(format: .markdown, source: "<script>alert(1)</script>")
+            )
+            throw CheckFailure(description: "Raw HTML was accepted in Markdown output.")
+        } catch AIOutputValidationError.rawHTML {
+            // Expected.
+        }
+        do {
+            try AIOutputDocumentValidator.validate(
+                AIOutputDocument(format: .markdown, source: "![image](https://example.com/a.png)")
+            )
+            throw CheckFailure(description: "Embedded Markdown images were accepted.")
+        } catch AIOutputValidationError.embeddedImage {
+            // Expected.
+        }
+    }
+
+    private static func structuredOutputChecks() async throws {
+        let markdownPayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"markdown\",\"content\":\"# Result\\n\\n\\\\(x^2\\\\)\"}"}]}]}"##.utf8
+        )
+        let parsed = try ResponsesAPIClient.parseCompletion(
+            from: markdownPayload,
+            outputSchema: .textDocument,
+            allowedOutputFormats: [.markdown]
+        )
+        try expect(
+            parsed.output == AIOutputDocument(
+                format: .markdown,
+                source: "# Result\n\n\\(x^2\\)"
+            ),
+            "Structured Markdown output was not decoded into a typed document."
+        )
+
+        let disallowedPayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"markdown\",\"content\":\"answer\"}"}]}]}"##.utf8
+        )
+        do {
+            _ = try ResponsesAPIClient.parseCompletion(
+                from: disallowedPayload,
+                outputSchema: .textDocument,
+                allowedOutputFormats: [.plainText]
+            )
+            throw CheckFailure(description: "Disallowed output format was accepted.")
+        } catch ResponsesAPIError.invalidOutput {
+            // Expected.
+        }
+
+        let calculatePayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"markdown\",\"answer\":\"Total: $12.00\"}"}]}]}"##.utf8
+        )
+        let calculated = try ResponsesAPIClient.parseCompletion(
+            from: calculatePayload,
+            outputSchema: .calculateAnswer,
+            allowedOutputFormats: [.plainText, .markdown]
+        )
+        try expect(
+            calculated.output == AIOutputDocument(
+                format: .markdown,
+                source: "Total: $12.00"
+            ),
+            "Calculate answer output was not isolated from its JSON envelope."
+        )
     }
 
     private static func promptAndPolicyChecks() async throws {
@@ -712,7 +866,8 @@ struct CoreChecks {
         try expect(
             calculateFormat["type"] as? String == "json_schema"
                 && calculateFormat["strict"] as? Bool == true
-                && (calculateSchema["required"] as? [String]) == ["answer"]
+                && (calculateSchema["required"] as? [String]) == ["format", "answer"]
+                && schemaProperties["format"] != nil
                 && schemaProperties["answer"] != nil,
             "Calculate must enforce a strict JSON answer schema."
         )
@@ -721,13 +876,13 @@ struct CoreChecks {
             "Translation text options were missing."
         )
         try expect(
-            plainText["format"] == nil,
-            "Non-calculate shortcuts must not send a JSON schema."
+            (plainText["format"] as? [String: Any])?["type"] as? String == "json_schema",
+            "Normal AI shortcuts must send a strict JSON document schema."
         )
     }
 
     private static func mockedSuccessCheck() async throws {
-        let payload = """
+        let payload = #"""
         {
           "status": "completed",
           "model": "gpt-5.4-2026-03-05",
@@ -735,12 +890,12 @@ struct CoreChecks {
             {"type": "reasoning", "id": "reasoning-test"},
             {
               "type": "message",
-              "content": [{"type": "output_text", "text": "Corrected text."}]
+              "content": [{"type": "output_text", "text": "{\"format\":\"plain_text\",\"content\":\"Corrected text.\"}"}]
             }
           ],
           "usage": {"input_tokens": 10, "output_tokens": 3, "total_tokens": 13}
         }
-        """.data(using: .utf8)!
+        """#.data(using: .utf8)!
         let client = ResponsesAPIClient(
             transport: MockTransport { request in
                 let response = HTTPURLResponse(
@@ -775,18 +930,18 @@ struct CoreChecks {
 
         let retryCounter = AttemptCounter()
         let recoveredPayload = Data(
-            """
+            #"""
             {
               "status": "completed",
               "model": "gpt-5.4-2026-03-05",
               "output": [
                 {
                   "type": "message",
-                  "content": [{"type": "output_text", "text": "Recovered."}]
+                  "content": [{"type": "output_text", "text": "{\"format\":\"plain_text\",\"content\":\"Recovered.\"}"}]
                 }
               ]
             }
-            """.utf8
+            """#.utf8
         )
         let retryingClient = ResponsesAPIClient(
             transport: MockTransport { request in

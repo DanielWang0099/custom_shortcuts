@@ -94,6 +94,7 @@ public struct PromptSpec: Equatable, Sendable {
     public let maxOutputTokens: Int
     public let reasoningEffort: ReasoningEffort
     public let outputSchema: OutputSchema?
+    public let allowedOutputFormats: [AIOutputFormat]
 
     public init(
         action: AIShortcutAction,
@@ -101,7 +102,8 @@ public struct PromptSpec: Equatable, Sendable {
         inputText: String,
         maxOutputTokens: Int,
         reasoningEffort: ReasoningEffort = .none,
-        outputSchema: OutputSchema? = nil
+        outputSchema: OutputSchema? = nil,
+        allowedOutputFormats: [AIOutputFormat] = []
     ) {
         self.action = action
         self.instructions = instructions
@@ -109,6 +111,7 @@ public struct PromptSpec: Equatable, Sendable {
         self.maxOutputTokens = maxOutputTokens
         self.reasoningEffort = reasoningEffort
         self.outputSchema = outputSchema
+        self.allowedOutputFormats = allowedOutputFormats
     }
 
     public var model: String {
@@ -123,6 +126,7 @@ public enum ReasoningEffort: String, Equatable, Sendable {
 }
 
 public enum OutputSchema: String, Equatable, Sendable {
+    case textDocument
     case calculateAnswer
 }
 
@@ -144,7 +148,9 @@ public enum PromptBuilder {
                 transcription. If there is no readable text, return an empty string.
                 """,
                 inputText: "Transcribe the text in this cropped screenshot.",
-                maxOutputTokens: AppConstants.maximumOutputTokens
+                maxOutputTokens: AppConstants.maximumOutputTokens,
+                outputSchema: .textDocument,
+                allowedOutputFormats: AIOutputPolicy.allowedFormats(for: .ocr)
             )
         case .refine:
             return PromptSpec(
@@ -159,7 +165,12 @@ public enum PromptBuilder {
                 formatting. Do not add new claims, commentary, headings, or explanations. Return only the revised text.
                 """,
                 inputText: selectedText ?? "",
-                maxOutputTokens: textOutputLimit(for: selectedText ?? "")
+                maxOutputTokens: textOutputLimit(for: selectedText ?? ""),
+                outputSchema: .textDocument,
+                allowedOutputFormats: AIOutputPolicy.allowedFormats(
+                    for: .refine,
+                    selectedText: selectedText
+                )
             )
         case .translate:
             let target = parameter?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -171,7 +182,12 @@ public enum PromptBuilder {
                 translation or add commentary. Return only the translated text.
                 """,
                 inputText: selectedText ?? "",
-                maxOutputTokens: textOutputLimit(for: selectedText ?? "")
+                maxOutputTokens: textOutputLimit(for: selectedText ?? ""),
+                outputSchema: .textDocument,
+                allowedOutputFormats: AIOutputPolicy.allowedFormats(
+                    for: .translate,
+                    selectedText: selectedText
+                )
             )
         case .format:
             let format = parameter?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -187,7 +203,12 @@ public enum PromptBuilder {
                 otherwise. Do not invent content or explain the result. Return only the formatted text.
                 """,
                 inputText: selectedText ?? "",
-                maxOutputTokens: textOutputLimit(for: selectedText ?? "")
+                maxOutputTokens: textOutputLimit(for: selectedText ?? ""),
+                outputSchema: .textDocument,
+                allowedOutputFormats: AIOutputPolicy.allowedFormats(
+                    for: .format,
+                    parameter: parameter
+                )
             )
         case .explain:
             let request = parameter?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -209,7 +230,9 @@ public enum PromptBuilder {
                     conversationContext: conversationContext
                 ),
                 maxOutputTokens: 768,
-                reasoningEffort: .low
+                reasoningEffort: .low,
+                outputSchema: .textDocument,
+                allowedOutputFormats: AIOutputPolicy.allowedFormats(for: .explain)
             )
         case .calculate:
             let request = parameter?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -244,7 +267,8 @@ public enum PromptBuilder {
                 // the final answer itself short.
                 maxOutputTokens: AppConstants.calculationMaximumOutputTokens,
                 reasoningEffort: .high,
-                outputSchema: .calculateAnswer
+                outputSchema: .calculateAnswer,
+                allowedOutputFormats: AIOutputPolicy.allowedFormats(for: .calculate)
             )
         case .finderPath:
             // The Finder Path shortcut runs entirely locally via AppleScript and
