@@ -21,6 +21,11 @@ trap '/bin/rm -rf "${TEMP_PATH}"' EXIT
 APP_PATH="${TEMP_PATH}/${APP_NAME}.app"
 CONTENTS_PATH="${APP_PATH}/Contents"
 MACOS_PATH="${CONTENTS_PATH}/MacOS"
+RENDERING_RESOURCE_BUNDLE="${PROJECT_DIR}/.build/arm64-apple-macosx/release/AIShortcuts_AIShortcutsRendering.bundle"
+if [[ ! -d "${RENDERING_RESOURCE_BUNDLE}" ]]; then
+    print "The bundled transcript renderer resources were not built."
+    exit 1
+fi
 /bin/mkdir -p "${MACOS_PATH}" "${CONTENTS_PATH}/Resources" "${OUTPUT_DIR}"
 
 /usr/bin/lipo -create \
@@ -28,6 +33,7 @@ MACOS_PATH="${CONTENTS_PATH}/MacOS"
     "${PROJECT_DIR}/.build/x86_64-apple-macosx/release/${EXECUTABLE_NAME}" \
     -output "${MACOS_PATH}/${EXECUTABLE_NAME}"
 /bin/chmod 755 "${MACOS_PATH}/${EXECUTABLE_NAME}"
+/usr/bin/ditto "${RENDERING_RESOURCE_BUNDLE}" "${CONTENTS_PATH}/Resources/$(basename "${RENDERING_RESOURCE_BUNDLE}")"
 
 INFO_PLIST="${CONTENTS_PATH}/Info.plist"
 /usr/bin/plutil -create xml1 "${INFO_PLIST}"

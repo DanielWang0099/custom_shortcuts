@@ -21,6 +21,7 @@ struct RenderingChecks {
     static func main() {
         do {
             try markdownAndClipboardCheck()
+            try webTranscriptCheck()
             try mathAttachmentCheck()
             try navierStokesMathCheck()
             try fractionAndScriptLayoutCheck()
@@ -94,6 +95,47 @@ struct RenderingChecks {
             headerCount == 1
                 && table.attributedString.string.contains("Count"),
             "Markdown tables were not rendered as a single native table."
+        )
+    }
+
+    private static func webTranscriptCheck() throws {
+        let source = """
+        For an incompressible fluid, the **Navier–Stokes equations** are
+
+        \\[
+        \\rho\\left(\\frac{\\partial \\mathbf{u}}{\\partial t} + (\\mathbf{u}\\cdot\\nabla)\\mathbf{u}\\right)
+        \\]
+        """
+        let renderer = WebRichTextRenderer()
+        let rendered = renderer.render(
+            AIOutputDocument(format: .markdown, source: source)
+        )
+        let page = renderer.htmlDocument(
+            body: "<main class=\"transcript\"><article class=\"message-assistant\">\(rendered)</article></main>"
+        )
+        let userMarkup = renderer.renderPlainText("equation for navier stokes")
+        let katexScriptExists = renderer.resourceBaseURL
+            .map { FileManager.default.fileExists(atPath: $0.appendingPathComponent("KaTeX/katex.min.js").path) }
+            ?? false
+        try expect(
+            rendered.contains("class=\"math-block\"")
+                && !rendered.hasPrefix("<main")
+                && !rendered.contains("\\[")
+                && rendered.contains("data-display=\"true\"")
+                && userMarkup.contains("plain-text")
+                && katexScriptExists
+                && page.contains("KaTeX/katex.min.js")
+                && page.contains("KaTeX/katex.min.css")
+                && page.contains("--accent: #8074fb"),
+            "The local WebKit transcript document was missing styled math or app theme resources."
+        )
+
+        let unsafe = renderer.render(
+            AIOutputDocument(format: .markdown, source: "<script>alert(1)</script>")
+        )
+        try expect(
+            unsafe.contains("&lt;script&gt;") && !unsafe.contains("<script>alert"),
+            "Web transcript rendering did not escape unsafe source content."
         )
     }
 
