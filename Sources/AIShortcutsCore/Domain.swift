@@ -73,7 +73,7 @@ public struct HotKeyDefinition: Equatable, Sendable {
 }
 
 public enum AppConstants {
-    // Pin the complimentary-eligible full snapshot to avoid alias drift.
+    // Pin the full snapshot to avoid alias drift.
     public static let fullModel = "gpt-5.4-2026-03-05"
     public static let responsesURL = URL(string: "https://api.openai.com/v1/responses")!
     // These are local reservation guards, not account usage meters.

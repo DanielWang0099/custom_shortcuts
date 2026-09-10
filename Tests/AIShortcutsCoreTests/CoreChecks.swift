@@ -850,7 +850,7 @@ struct CoreChecks {
         )
         try expect(
             json["model"] as? String == "gpt-5.4-2026-03-05",
-            "Request did not use the complimentary-eligible GPT-5.4 snapshot."
+            "Request did not use the pinned GPT-5.4 snapshot."
         )
         try expect(json["store"] as? Bool == false, "store was not false.")
         try expect(

@@ -3,3 +3,8 @@ dist/
 .swiftpm/
 *.xcodeproj/
 .DS_Store
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example

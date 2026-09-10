@@ -31,31 +31,30 @@ The original normalized Markdown/LaTeX source is always the plain-text clipboard
 
 ## Install
 
-The app expects the existing key source at:
-
-`~/Documents/GitHub/japanese-practice/vocabulary-flashcard-practice/.env.local`
-
-The file must contain `OPENAI_API_KEY`. The installer and application never print the value. On first launch, the app imports the exact value into the macOS login Keychain.
+This project does not include an OpenAI API key. Each user supplies their own key, which the app stores in the macOS login Keychain. The key is never written to the repository or logged.
 
 ```sh
+# Recommended: build and install, then enter your key when the app prompts.
 ./Scripts/install.sh
 ```
+
+For local setup without the prompt, copy `.env.example` to `.env.local`, add your own `OPENAI_API_KEY`, and run `./Scripts/install.sh`. The installer reads `.env.local` from the repository root by default; you can pass another env-file path as its first argument or set `AI_SHORTCUTS_KEY_FILE`. The file is ignored by Git.
 
 On first launch:
 
 1. Grant Accessibility and Screen Recording permissions. Install/update resets this app's stale entries for both permissions and its rebuilt-signature Keychain item before launching the new app. macOS may require restarting the app after Screen Recording is granted.
-2. After the macOS permission flow and any required restart are complete, confirm in the OpenAI dashboard that the key's project is enrolled for complimentary daily tokens and input/output sharing is enabled.
-3. Read the disclosure and choose **I Confirm**. The app then imports the key into the macOS login Keychain.
+2. Review the billing and data controls for your OpenAI project.
+3. Read the disclosure, choose **I Confirm**, and enter your own key when prompted. It is saved in the macOS login Keychain.
 
 If a permission is missing later, using an affected shortcut opens the correct System Settings pane automatically. The menu also provides **Restart AI Shortcuts**.
 
-`Scripts/build_family_installer.sh` creates a private, single-file family installer in `dist/`. That generated file embeds the configured shared API key and is intentionally ignored by Git; distribute it only through a private channel.
+`Scripts/build_family_installer.sh` creates a single-file installer in `dist/`. The generated installer is key-free; each user configures their own key on first launch. `dist/` is ignored by Git.
 
 The menu-bar sparkle provides permission status, API key status, the local budget guard, data-sharing settings, key reload, restart, and a scrollable **Shortcut Guide…** explaining every available shortcut.
 
-## Complimentary-token guard and privacy
+## Token budget and privacy
 
-Every AI shortcut uses the pinned full `gpt-5.4-2026-03-05` snapshot with a shared 1,000,000-token local UTC-day guard. Immediate OCR, Refine, Translate, and Format requests keep reasoning at `none`; Explain uses `low`, and Calculate uses `high` with a strict JSON answer schema so the popup and clipboard receive only the final answer, never model reasoning. Explain opens only from Control–Option–Command–E, keeps its composer and answers in one opaque, high-contrast borderless panel, closes when it loses focus, and continues an in-flight answer in the background. Its placeholder changes when selected text or pasted images are attached; hidden selected text is never rendered, while pasted images appear as removable thumbnails before submission. Explain keeps up to six recent exchanges in memory and starts a fresh chat after one hour of inactivity; image bytes are not retained in conversation history. The model matches the complimentary full-model pool shown for this account. There is no fallback model and no local OCR substitution.
+Every AI shortcut uses the pinned full `gpt-5.4-2026-03-05` snapshot with a shared 1,000,000-token local UTC-day guard. Immediate OCR, Refine, Translate, and Format requests keep reasoning at `none`; Explain uses `low`, and Calculate uses `high` with a strict JSON answer schema so the popup and clipboard receive only the final answer, never model reasoning. Explain opens only from Control–Option–Command–E, keeps its composer and answers in one opaque, high-contrast borderless panel, closes when it loses focus, and continues an in-flight answer in the background. Its placeholder changes when selected text or pasted images are attached; hidden selected text is never rendered, while pasted images appear as removable thumbnails before submission. Explain keeps up to six recent exchanges in memory and starts a fresh chat after one hour of inactivity; image bytes are not retained in conversation history. Model access, billing, and limits depend on the OpenAI project associated with each user's key. There is no fallback model and no local OCR substitution.
 
 Sequential Clipboard is entirely local. Each activation starts an empty in-memory queue, normal `⌘C` appends complete pasteboard items, the second Control–Option–Command–C switches to paste mode, and each normal `⌘V` consumes the next item. The final pasted item remains on the regular macOS clipboard after the queue empties. Quitting or crashing AI Shortcuts drops the temporary queue and event monitor automatically.
 
@@ -65,9 +64,13 @@ Insert also includes two non-editable entries marked **Dynamic**: Date (`YYYY-MM
 
 The utility keeps its small native chat controller warm for immediate display, but bounds conversation data to 48 KB. It has no polling or repeating timers and uses approximately 0% CPU while idle. Network sessions are refreshed after idle gaps to avoid stale VPN connections, and a single interrupted connection is retried once without changing models or endpoints.
 
-This local guard cannot see token use by other applications or verify organization eligibility. A normal project key cannot query organization-wide usage. OpenAI can bill requests when complimentary eligibility or quota is unavailable, so the guard reduces risk but cannot guarantee zero charges.
+This local guard cannot see token use by other applications or verify project eligibility. A normal project key cannot query organization-wide usage. Requests are billed according to the OpenAI project associated with the user's key; the guard reduces risk but cannot guarantee zero charges. Review the [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data) for the project before using the app.
 
-Selected text and cropped screenshots are shared with OpenAI when a shortcut is used. Do not use the shortcuts with sensitive, confidential, or proprietary content. Screenshots remain in memory and are never written to disk by this app. Prompts, responses, screenshots, selected text, and credentials are not logged.
+Selected text, cropped screenshots, and images pasted into Explain are shared with OpenAI when a shortcut is used. OpenAI's default abuse-monitoring logs may retain customer content for up to 30 days even when the request uses `store: false`. Do not use the shortcuts with sensitive, confidential, or proprietary content. Screenshots remain in memory and are never written to disk by this app. Prompts, responses, screenshots, selected text, and credentials are not logged.
+
+## Public-source safety
+
+The source code is intended to be public, but API keys are not. Do not commit `.env.local`, `dist/`, or any generated installer containing a key. Build installers locally from this repository; the generated installer is designed to be key-free and asks each user to configure their own key.
 
 ## Development
 
