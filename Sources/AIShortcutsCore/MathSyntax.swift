@@ -290,7 +290,7 @@ public enum MathSyntax {
         "to", "in", "notin", "subset", "subseteq", "cup", "cap", "forall", "exists",
         "langle", "rangle", "vert", "Vert",
         "sin", "cos", "tan", "cot", "sec", "csc", "log", "ln", "exp", "lim",
-        "left", "right",
+        "left", "right", "mathbf",
     ]
 
     private static func isValidCandidate(

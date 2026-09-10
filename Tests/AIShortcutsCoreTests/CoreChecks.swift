@@ -194,6 +194,7 @@ struct CoreChecks {
         try expect(
             MathSyntax.isSupportedExpression("x^2 + \\frac{1}{2} + \\sqrt{y}")
                 && MathSyntax.isSupportedExpression("\\alpha_1 + \\sum x")
+                && MathSyntax.isSupportedExpression("\\rho \\mathbf{u}")
                 && !MathSyntax.isSupportedExpression("\\begin{matrix}a & b\\end{matrix}"),
             "The common native LaTeX grammar was not enforced."
         )

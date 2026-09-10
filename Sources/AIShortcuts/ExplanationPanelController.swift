@@ -52,7 +52,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
 
     override init() {
         panel = ExplainChatPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 340),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 390),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -89,6 +89,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         configureTranscript(in: background)
         configureComposer(in: background)
         panel.contentView = background
+        updateComposerLayout()
     }
 
     func show(
@@ -116,7 +117,12 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) })
             ?? NSScreen.main
         let visible = screen?.visibleFrame
-            ?? NSRect(x: mouse.x - 310, y: mouse.y - 170, width: 620, height: 340)
+            ?? NSRect(
+                x: mouse.x - panel.frame.width / 2,
+                y: mouse.y - panel.frame.height / 2,
+                width: panel.frame.width,
+                height: panel.frame.height
+            )
         panel.setFrameOrigin(
             NSPoint(
                 x: visible.midX - panel.frame.width / 2,
@@ -228,13 +234,13 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
     private func configureHeader(in background: NSView) {
         headerTitleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
         headerTitleLabel.textColor = ShortcutUIStyle.primaryTextColor
-        headerTitleLabel.frame = NSRect(x: 22, y: 296, width: 120, height: 22)
+        headerTitleLabel.frame = NSRect(x: 22, y: 346, width: 120, height: 22)
         headerTitleLabel.setAccessibilityLabel("Explain")
 
         contextLabel.font = .systemFont(ofSize: 11.5, weight: .medium)
         contextLabel.textColor = ShortcutUIStyle.secondaryTextColor
         contextLabel.alignment = .right
-        contextLabel.frame = NSRect(x: 150, y: 299, width: 448, height: 18)
+        contextLabel.frame = NSRect(x: 150, y: 349, width: 448, height: 18)
         contextLabel.setAccessibilityLabel("Context")
 
         background.addSubview(headerTitleLabel)
@@ -478,9 +484,22 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         let hasImages = !pastedImages.isEmpty
         composerSurface.frame.size.height = hasImages ? 116 : 66
         attachmentStrip.isHidden = !hasImages
-        transcriptScrollView.frame = hasImages
-            ? NSRect(x: 18, y: 142, width: 584, height: 138)
-            : NSRect(x: 18, y: 92, width: 584, height: 188)
+
+        guard let contentView = panel.contentView else {
+            return
+        }
+        let contentHeight = contentView.bounds.height
+        headerTitleLabel.frame.origin.y = contentHeight - 44
+        contextLabel.frame.origin.y = contentHeight - 41
+
+        let transcriptOriginY = composerSurface.frame.maxY + 12
+        let transcriptCeiling = headerTitleLabel.frame.minY - 16
+        transcriptScrollView.frame = NSRect(
+            x: 18,
+            y: transcriptOriginY,
+            width: contentView.bounds.width - 36,
+            height: max(80, transcriptCeiling - transcriptOriginY)
+        )
     }
 
     private static func displayRequest(_ request: String, imageCount: Int) -> String {
@@ -546,19 +565,19 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
             scrollTranscriptToTop()
         case let .latestUser(animated):
             if let latestUserRange {
-                scrollTranscript(to: latestUserRange, leadingInset: 18, animated: animated)
+                scrollTranscript(to: latestUserRange, leadingInset: 0, animated: animated)
             } else {
                 scrollTranscriptToTop()
             }
         case let .latestAnswer(animated):
             if let latestAssistantRange {
-                scrollTranscript(to: latestAssistantRange, leadingInset: 8, animated: animated)
+                scrollTranscript(to: latestAssistantRange, leadingInset: 0, animated: animated)
             } else {
                 scrollTranscriptToTop()
             }
         case let .end(animated):
             if let range = statusRange ?? latestAssistantRange ?? latestUserRange {
-                scrollTranscript(to: range, leadingInset: 8, animated: animated)
+                scrollTranscript(to: range, leadingInset: 0, animated: animated)
             } else {
                 scrollTranscriptToTop()
             }
