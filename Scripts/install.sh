@@ -58,6 +58,11 @@ swift run AIShortcutsCoreChecks
 swift run AIShortcutsRenderingChecks
 swift build -c release --product AIShortcuts
 BIN_PATH=$(swift build -c release --show-bin-path)
+RENDERING_RESOURCE_BUNDLE="${BIN_PATH}/AIShortcuts_AIShortcutsRendering.bundle"
+if [[ ! -d "${RENDERING_RESOURCE_BUNDLE}" ]]; then
+  print "The bundled transcript renderer resources were not built."
+  exit 1
+fi
 
 mkdir -p "${HOME}/Applications" "${HOME}/Library/LaunchAgents"
 launchctl bootout "gui/${UID}" "${AGENT_PATH}" >/dev/null 2>&1 || true
@@ -94,6 +99,7 @@ if [[ -e "${APP_PATH}" ]]; then
 fi
 mkdir -p "${MACOS_PATH}" "${CONTENTS_PATH}/Resources"
 cp "${BIN_PATH}/${EXECUTABLE_NAME}" "${MACOS_PATH}/${EXECUTABLE_NAME}"
+cp -R "${RENDERING_RESOURCE_BUNDLE}" "${CONTENTS_PATH}/Resources/"
 chmod 755 "${MACOS_PATH}/${EXECUTABLE_NAME}"
 
 INFO_PLIST="${CONTENTS_PATH}/Info.plist"

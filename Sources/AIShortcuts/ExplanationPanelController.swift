@@ -1,9 +1,10 @@
 import AppKit
 import AIShortcutsCore
 import AIShortcutsRendering
+import WebKit
 
 @MainActor
-final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDelegate {
+final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDelegate {
     private enum TranscriptScrollTarget {
         case top
         case latestUser(animated: Bool)
@@ -12,8 +13,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
     }
 
     private let panel: ExplainChatPanel
-    private let transcriptView: RichTranscriptTextView
-    private let transcriptScrollView: NSScrollView
+    private let transcriptView: WKWebView
     private let promptView: PasteAwareTextView
     private let promptScrollView: NSScrollView
     private let attachmentStrip: NSView
@@ -23,17 +23,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
     private let composerSurface: NSView
     private let submitButton: NSButton
     private let progressIndicator: NSProgressIndicator
-    private let richTextRenderer = NativeRichTextRenderer(
-        theme: RichTextTheme(
-            bodyFont: .systemFont(ofSize: 15),
-            codeFont: .monospacedSystemFont(ofSize: 13, weight: .regular),
-            bodyColor: ShortcutUIStyle.primaryTextColor,
-            secondaryColor: ShortcutUIStyle.secondaryTextColor,
-            accentColor: ShortcutUIStyle.accentColor,
-            codeBackgroundColor: ShortcutUIStyle.raisedSurfaceColor,
-            tableBorderColor: ShortcutUIStyle.contentBorderColor
-        )
-    )
+    private let webTextRenderer = WebRichTextRenderer()
 
     private var submitHandler: ((String, [Data]) -> Void)?
     private var exchanges: [ExplanationExchange] = []
@@ -43,6 +33,9 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
     private var isLoading = false
     private var transcriptScrollTarget: TranscriptScrollTarget = .top
     private var pastedImages: [ExplainPastedImage] = []
+    private var latestUserAnchor: String?
+    private var latestAssistantAnchor: String?
+    private var statusAnchor: String?
 
     private static let maximumPastedImages = 4
 
@@ -57,8 +50,9 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
             backing: .buffered,
             defer: false
         )
-        transcriptView = RichTranscriptTextView()
-        transcriptScrollView = NSScrollView()
+        let webConfiguration = WKWebViewConfiguration()
+        webConfiguration.defaultWebpagePreferences.allowsContentJavaScript = true
+        transcriptView = WKWebView(frame: .zero, configuration: webConfiguration)
         promptView = PasteAwareTextView()
         promptScrollView = NSScrollView()
         attachmentStrip = NSView()
@@ -248,30 +242,14 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
     }
 
     private func configureTranscript(in background: NSView) {
-        transcriptView.isEditable = false
-        transcriptView.isSelectable = true
-        transcriptView.drawsBackground = false
-        transcriptView.isRichText = true
-        transcriptView.importsGraphics = true
-        transcriptView.isAutomaticLinkDetectionEnabled = false
-        transcriptView.textContainerInset = NSSize(width: 4, height: 8)
+        transcriptView.navigationDelegate = self
+        transcriptView.setValue(false, forKey: "drawsBackground")
+        transcriptView.wantsLayer = true
+        transcriptView.layer?.backgroundColor = NSColor.clear.cgColor
+        transcriptView.setAccessibilityLabel("Explanation transcript")
         transcriptView.frame = NSRect(x: 0, y: 0, width: 584, height: 188)
-        transcriptView.isVerticallyResizable = true
-        transcriptView.isHorizontallyResizable = false
-        transcriptView.autoresizingMask = [.width]
-        transcriptView.textContainer?.widthTracksTextView = true
-        transcriptView.textContainer?.containerSize = NSSize(
-            width: 600,
-            height: CGFloat.greatestFiniteMagnitude
-        )
-
-        transcriptScrollView.frame = NSRect(x: 18, y: 92, width: 584, height: 188)
-        transcriptScrollView.autoresizingMask = [.width, .height]
-        transcriptScrollView.hasVerticalScroller = true
-        transcriptScrollView.scrollerStyle = .overlay
-        transcriptScrollView.drawsBackground = false
-        transcriptScrollView.documentView = transcriptView
-        background.addSubview(transcriptScrollView)
+        transcriptView.autoresizingMask = [.width, .height]
+        background.addSubview(transcriptView)
     }
 
     private func configureComposer(in background: NSView) {
@@ -494,7 +472,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
 
         let transcriptOriginY = composerSurface.frame.maxY + 12
         let transcriptCeiling = headerTitleLabel.frame.minY - 16
-        transcriptScrollView.frame = NSRect(
+        transcriptView.frame = NSRect(
             x: 18,
             y: transcriptOriginY,
             width: contentView.bounds.width - 36,
@@ -519,168 +497,98 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
     }
 
     private func renderTranscript() {
-        let rendered = NSMutableAttributedString()
-        var richSourceSegments: [RichTranscriptSourceSegment] = []
-        var latestUserRange: NSRange?
-        var latestAssistantRange: NSRange?
+        var body = "<main class=\"transcript\">"
+        var messageIndex = 0
+        latestUserAnchor = nil
+        latestAssistantAnchor = nil
+        statusAnchor = nil
+
         for exchange in exchanges {
             if !exchange.request.isEmpty {
-                latestUserRange = appendUserText(exchange.request, to: rendered)
+                let anchor = "user-\(messageIndex)"
+                latestUserAnchor = anchor
+                body += "<section class=\"message-user\" id=\"\(anchor)\">"
+                body += webTextRenderer.renderPlainText(exchange.request)
+                body += "</section>"
+                messageIndex += 1
             }
-            latestAssistantRange = appendAssistantText(
-                exchange.explanation,
-                to: rendered,
-                sourceSegments: &richSourceSegments
-            )
+            let anchor = "assistant-\(messageIndex)"
+            latestAssistantAnchor = anchor
+            body += "<article class=\"message-assistant\" id=\"\(anchor)\">"
+            body += webTextRenderer.render(exchange.explanation)
+            body += "</article>"
+            messageIndex += 1
         }
 
         if let pendingRequest, !pendingRequest.isEmpty {
-            latestUserRange = appendUserText(pendingRequest, to: rendered)
+            let anchor = "user-\(messageIndex)"
+            latestUserAnchor = anchor
+            body += "<section class=\"message-user\" id=\"\(anchor)\">"
+            body += webTextRenderer.renderPlainText(pendingRequest)
+            body += "</section>"
+            messageIndex += 1
         }
-        var statusRange: NSRange?
         if isLoading {
-            statusRange = appendStatus(
-                "Thinking…",
-                color: ShortcutUIStyle.secondaryTextColor,
-                to: rendered
-            )
+            statusAnchor = "status"
+            body += "<div class=\"status\" id=\"status\">"
+            body += webTextRenderer.renderPlainText("Thinking…")
+            body += "</div>"
         } else if let errorText {
-            statusRange = appendStatus(
-                errorText,
-                color: ShortcutUIStyle.warningAccentColor,
-                to: rendered
-            )
+            statusAnchor = "status"
+            body += "<div class=\"status error\" id=\"status\">"
+            body += webTextRenderer.renderPlainText(errorText)
+            body += "</div>"
         }
 
-        transcriptView.textStorage?.setAttributedString(rendered)
-        transcriptView.sourceSegments = richSourceSegments
-        let viewportHeight = transcriptScrollView.contentView.bounds.height
-        let contentHeight = NativeTextViewLayout.fitDocumentView(
-            transcriptView,
-            minimumHeight: viewportHeight
+        body += "</main>"
+        transcriptView.loadHTMLString(
+            webTextRenderer.htmlDocument(body: body),
+            baseURL: webTextRenderer.resourceBaseURL
         )
-        transcriptScrollView.hasVerticalScroller = contentHeight > viewportHeight + 0.5
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        applyTranscriptScrollTarget()
+    }
+
+    private func applyTranscriptScrollTarget() {
+        let anchor: String?
+        let animated: Bool
         switch transcriptScrollTarget {
         case .top:
-            scrollTranscriptToTop()
-        case let .latestUser(animated):
-            if let latestUserRange {
-                scrollTranscript(to: latestUserRange, leadingInset: 0, animated: animated)
-            } else {
-                scrollTranscriptToTop()
-            }
-        case let .latestAnswer(animated):
-            if let latestAssistantRange {
-                scrollTranscript(to: latestAssistantRange, leadingInset: 0, animated: animated)
-            } else {
-                scrollTranscriptToTop()
-            }
-        case let .end(animated):
-            if let range = statusRange ?? latestAssistantRange ?? latestUserRange {
-                scrollTranscript(to: range, leadingInset: 0, animated: animated)
-            } else {
-                scrollTranscriptToTop()
-            }
+            anchor = nil
+            animated = false
+        case let .latestUser(isAnimated):
+            anchor = latestUserAnchor
+            animated = isAnimated
+        case let .latestAnswer(isAnimated):
+            anchor = latestAssistantAnchor
+            animated = isAnimated
+        case let .end(isAnimated):
+            anchor = statusAnchor ?? latestAssistantAnchor ?? latestUserAnchor
+            animated = isAnimated
         }
-    }
 
-    @discardableResult
-    private func appendAssistantText(
-        _ document: AIOutputDocument,
-        to rendered: NSMutableAttributedString,
-        sourceSegments: inout [RichTranscriptSourceSegment]
-    ) -> NSRange {
-        let start = rendered.length
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.paragraphSpacingBefore = 10
-        paragraph.paragraphSpacing = 8
-        paragraph.lineSpacing = 5
-        paragraph.firstLineHeadIndent = 4
-        paragraph.headIndent = 4
-        paragraph.tailIndent = -18
-        rendered.append(
-            NSAttributedString(
-                string: "Explain\n",
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                    .foregroundColor: ShortcutUIStyle.secondaryTextColor,
-                    .paragraphStyle: paragraph,
-                ]
-            )
-        )
-        let richOutput = richTextRenderer.render(document)
-        let contentStart = rendered.length
-        rendered.append(richOutput.attributedString)
-        sourceSegments.append(
-            RichTranscriptSourceSegment(
-                renderedRange: NSRange(
-                    location: contentStart,
-                    length: richOutput.attributedString.length
-                ),
-                payload: richOutput.clipboardPayload
-            )
-        )
-        rendered.append(
-            NSAttributedString(
-                string: "\n",
-                attributes: [.paragraphStyle: paragraph]
-            )
-        )
-        return NSRange(location: start, length: rendered.length - start)
-    }
-
-    private func scrollTranscript(
-        to range: NSRange,
-        leadingInset: CGFloat,
-        animated: Bool
-    ) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self,
-                  let layoutManager = transcriptView.layoutManager,
-                  let textContainer = transcriptView.textContainer
-            else {
-                return
+        let behavior = animated ? "smooth" : "auto"
+        let anchorScript: String
+        if let anchor {
+            anchorScript = """
+            const target = document.getElementById('\(anchor)');
+            if (target) {
+              const top = target.getBoundingClientRect().top + window.scrollY;
+              window.scrollTo({ top: Math.max(0, top), behavior: '\(behavior)' });
+              return;
             }
-            layoutManager.ensureLayout(for: textContainer)
-            let glyphRange = layoutManager.glyphRange(
-                forCharacterRange: range,
-                actualCharacterRange: nil
-            )
-            let targetRect = layoutManager.boundingRect(
-                forGlyphRange: glyphRange,
-                in: textContainer
-            )
-            let clipView = transcriptScrollView.contentView
-            let maximumY = max(0, transcriptView.bounds.height - clipView.bounds.height)
-            let target = NSPoint(
-                x: clipView.bounds.origin.x,
-                y: min(max(0, targetRect.minY - leadingInset), maximumY)
-            )
-            guard animated else {
-                clipView.setBoundsOrigin(target)
-                transcriptScrollView.reflectScrolledClipView(clipView)
-                return
-            }
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.24
-                clipView.animator().setBoundsOrigin(target)
-            } completionHandler: {
-                Task { @MainActor [weak self] in
-                    self?.transcriptScrollView.reflectScrolledClipView(clipView)
-                }
-            }
+            """
+        } else {
+            anchorScript = ""
         }
-    }
-
-    private func scrollTranscriptToTop() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else {
-                return
-            }
-            let clipView = transcriptScrollView.contentView
-            clipView.setBoundsOrigin(NSPoint(x: clipView.bounds.origin.x, y: 0))
-            transcriptScrollView.reflectScrolledClipView(clipView)
-        }
+        transcriptView.evaluateJavaScript("""
+        (() => {
+          \(anchorScript)
+          window.scrollTo({ top: 0, behavior: 'auto' });
+        })();
+        """)
     }
 
     private func resetComposerScrollPosition() {
@@ -692,84 +600,6 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
             clipView.setBoundsOrigin(NSPoint(x: clipView.bounds.origin.x, y: 0))
             promptScrollView.reflectScrolledClipView(clipView)
         }
-    }
-
-    @discardableResult
-    private func appendUserText(
-        _ text: String,
-        to rendered: NSMutableAttributedString
-    ) -> NSRange {
-        let start = rendered.length
-        let block = UserPromptTextBlock()
-        block.setContentWidth(96, type: .percentageValueType)
-        block.setWidth(8, type: .absoluteValueType, for: .padding)
-        block.setWidth(12, type: .absoluteValueType, for: .padding, edge: .minX)
-        block.setWidth(12, type: .absoluteValueType, for: .padding, edge: .maxX)
-        block.setWidth(4, type: .absoluteValueType, for: .margin, edge: .minY)
-        block.setWidth(4, type: .absoluteValueType, for: .margin, edge: .maxY)
-
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.textBlocks = [block]
-        paragraph.paragraphSpacing = 8
-        paragraph.lineSpacing = 4
-        rendered.append(
-            NSAttributedString(
-                string: "You\n",
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                    .foregroundColor: ShortcutUIStyle.accentColor,
-                    .paragraphStyle: paragraph,
-                ]
-            )
-        )
-        rendered.append(
-            NSAttributedString(
-                string: "\(text)\n",
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 15),
-                    .foregroundColor: ShortcutUIStyle.primaryTextColor,
-                    .paragraphStyle: paragraph,
-                ]
-            )
-        )
-        return NSRange(location: start, length: rendered.length - start)
-    }
-
-    @discardableResult
-    private func appendStatus(
-        _ text: String,
-        color: NSColor,
-        to rendered: NSMutableAttributedString
-    ) -> NSRange {
-        let start = rendered.length
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.paragraphSpacingBefore = 10
-        paragraph.paragraphSpacing = 8
-        paragraph.lineSpacing = 5
-        paragraph.firstLineHeadIndent = 4
-        paragraph.headIndent = 4
-        paragraph.tailIndent = -18
-        rendered.append(
-            NSAttributedString(
-                string: "Explain\n",
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                    .foregroundColor: ShortcutUIStyle.secondaryTextColor,
-                    .paragraphStyle: paragraph,
-                ]
-            )
-        )
-        rendered.append(
-            NSAttributedString(
-                string: "\(text)\n",
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 14),
-                    .foregroundColor: color,
-                    .paragraphStyle: paragraph,
-                ]
-            )
-        )
-        return NSRange(location: start, length: rendered.length - start)
     }
 
 }
@@ -798,26 +628,6 @@ private struct ExplainPastedImage {
     }
 }
 
-private struct RichTranscriptSourceSegment {
-    let renderedRange: NSRange
-    let payload: RichClipboardPayload
-}
-
-private final class RichTranscriptTextView: NSTextView {
-    var sourceSegments: [RichTranscriptSourceSegment] = []
-
-    override func copy(_ sender: Any?) {
-        let selection = selectedRange()
-        if let segment = sourceSegments.first(where: {
-            NSEqualRanges($0.renderedRange, selection)
-        }) {
-            segment.payload.write(to: NSPasteboard.general)
-            return
-        }
-        super.copy(sender)
-    }
-}
-
 private final class PasteAwareTextView: NSTextView {
     var onPasteImages: (([NSImage]) -> Void)?
 
@@ -836,37 +646,6 @@ private final class PasteAwareTextView: NSTextView {
             return
         }
         super.paste(sender)
-    }
-}
-
-private final class UserPromptTextBlock: NSTextBlock {
-    override func drawBackground(
-        withFrame frameRect: NSRect,
-        in controlView: NSView,
-        characterRange charRange: NSRange,
-        layoutManager: NSLayoutManager
-    ) {
-        let backgroundRect = frameRect.insetBy(dx: 0.5, dy: 0.5)
-        let path = NSBezierPath(
-            roundedRect: backgroundRect,
-            xRadius: 11,
-            yRadius: 11
-        )
-        NSColor(
-            srgbRed: 0.155,
-            green: 0.150,
-            blue: 0.205,
-            alpha: 1
-        ).setFill()
-        path.fill()
-        NSColor(
-            srgbRed: 0.500,
-            green: 0.455,
-            blue: 0.985,
-            alpha: 0.34
-        ).setStroke()
-        path.lineWidth = 1
-        path.stroke()
     }
 }
 

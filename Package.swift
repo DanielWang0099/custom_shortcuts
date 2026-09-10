@@ -17,6 +17,9 @@ let package = Package(
         .target(
             name: "AIShortcutsRendering",
             dependencies: ["AIShortcutsCore"],
+            resources: [
+                .copy("Resources")
+            ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreText"),
@@ -32,6 +35,7 @@ let package = Package(
                 .linkedFramework("Carbon"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("Security"),
+                .linkedFramework("WebKit"),
             ]
         ),
         .executableTarget(
