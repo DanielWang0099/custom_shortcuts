@@ -22,6 +22,7 @@ struct RenderingChecks {
         do {
             try markdownAndClipboardCheck()
             try mathAttachmentCheck()
+            try navierStokesMathCheck()
             try fractionAndScriptLayoutCheck()
             try commonDelimiterAndPlainTextCheck()
             try displayMathLayoutCheck()
@@ -163,6 +164,28 @@ struct RenderingChecks {
                 && nestedOpaqueBounds.maxY > nestedImageHeight * 0.75
                 && nestedRendered.fallbackMathSources.isEmpty,
             "Nested fractions or scripts were clipped or fell back to source."
+        )
+    }
+
+    private static func navierStokesMathCheck() throws {
+        let source = """
+        For an incompressible fluid, the **Navier–Stokes equations** are
+
+        \\[
+        \\rho\\left(\\frac{\\partial \\mathbf{u}}{\\partial t} + (\\mathbf{u}\\cdot\\nabla)\\mathbf{u}\\right)
+        \\]
+        """
+        let rendered = NativeRichTextRenderer().render(
+            AIOutputDocument(format: .markdown, source: source)
+        )
+        let equationWidth = firstAttachment(in: rendered.attributedString)?.image?.size.width
+        try expect(
+            attachmentCount(in: rendered.attributedString) == 1
+                && rendered.fallbackMathSources.isEmpty
+                && !rendered.attributedString.string.contains("\\mathbf")
+                && !rendered.attributedString.string.contains("\\[")
+                && (equationWidth ?? .greatestFiniteMagnitude) < 540,
+            "The Navier–Stokes equation fell back to visible LaTeX source."
         )
     }
 

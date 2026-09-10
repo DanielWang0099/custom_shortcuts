@@ -939,6 +939,7 @@ private indirect enum MathNode {
     case fraction(MathNode, MathNode)
     case radical(MathNode)
     case scripts(base: MathNode, superscript: MathNode?, subscriptNode: MathNode?)
+    case bold(MathNode)
 }
 
 @MainActor
@@ -1063,6 +1064,8 @@ private final class NativeMathImageRenderer {
                     -(subBaseline ?? 0) + (subMetrics?.descent ?? 0)
                 )
             )
+        case let .bold(content):
+            return measure(content, font: boldFont(from: font))
         }
     }
 
@@ -1165,7 +1168,13 @@ private final class NativeMathImageRenderer {
                     font: scriptFont
                 )
             }
+        case let .bold(content):
+            draw(content, at: baseline, font: boldFont(from: font))
         }
+    }
+
+    private func boldFont(from font: NSFont) -> NSFont {
+        NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
     }
 }
 
@@ -1287,6 +1296,9 @@ private final class MathExpressionParser {
             return .radical(content)
         case "left", "right":
             return .text("")
+        case "mathbf":
+            guard let content = parseArgument() else { return nil }
+            return .bold(content)
         default:
             guard let symbol = Self.symbols[command] else {
                 return nil
