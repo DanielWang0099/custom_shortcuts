@@ -191,17 +191,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = "Enable AI Shortcuts"
         alert.informativeText = """
         What happens
-        Selected text, cropped screenshots, images pasted into Explain, and Insert key labels used for ambiguous lookup 
-        are sent to OpenAI with the API key from japanese-practice. Saved Insert values stay local and are never sent.
+        Selected text, cropped screenshots, images pasted into Explain, and Insert key labels used for ambiguous lookup
+        are sent to OpenAI using your own API key. Saved Insert values stay local and are never sent.
 
         Before continuing
-        To use complimentary data-sharing tokens, enroll this key's project and enable input/output sharing in the \
-        OpenAI dashboard. Every shortcut uses GPT-5.4 and shares a 1,000,000-token local UTC-day guard. The app cannot \
-        see usage from other apps.
+        Review the billing and data controls for the OpenAI project that owns your key. Every shortcut uses GPT-5.4
+        and has a 1,000,000-token local UTC-day guard. The app cannot see usage from other apps.
 
         Privacy and billing
-        OpenAI may bill requests when eligibility or complimentary quota is unavailable. Do not send sensitive, \
-        confidential, or proprietary content. Choose “I Confirm” only after the dashboard says this project is enrolled.
+        Requests may be billed to your OpenAI project. Do not send sensitive, confidential, or proprietary content.
+        Choose “I Confirm” only after reviewing the data controls and billing settings for your project.
         """
         alert.addButton(withTitle: "I Confirm")
         alert.addButton(withTitle: "Open Data Settings")
@@ -210,8 +209,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch alert.runModal() {
         case .alertFirstButtonReturn:
             stateStore.dataSharingAcknowledged = true
-            loadOrImportAPIKey(showFeedback: false)
-            hud.showSuccess()
+            if loadOrImportAPIKey(showFeedback: false) {
+                hud.showSuccess()
+            }
         case .alertSecondButtonReturn:
             NSWorkspace.shared.open(AppConfiguration.dataSharingSettingsURL)
         default:
@@ -276,10 +276,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @discardableResult
     private func loadOrImportAPIKey(
         showFeedback: Bool,
         forceImport: Bool = false
-    ) {
+    ) -> Bool {
         apiKeyLoadAttempted = true
         do {
             if let bootstrapped = try consumeBootstrapAPIKey() {
@@ -288,22 +289,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else if !forceImport, let existing = try keychainStore.read() {
                 apiKey = existing
             } else {
-                let imported = try KeySourceParser.loadOpenAIKey(
-                    from: AppConfiguration.sourceKeyURL
-                )
-                try keychainStore.save(imported)
-                apiKey = imported
+                guard let entered = promptForAPIKey() else {
+                    return false
+                }
+                try keychainStore.save(entered)
+                apiKey = entered
             }
             if showFeedback {
                 hud.showSuccess(text: "API key loaded")
             }
+            return true
         } catch {
             apiKey = nil
             if showFeedback {
                 hud.showError(error.localizedDescription)
             }
             logger.error("The API key could not be loaded.")
+            return false
         }
+    }
+
+    private func promptForAPIKey() -> String? {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Add your OpenAI API key"
+        alert.informativeText = """
+        AI Shortcuts uses your own OpenAI project. The key is stored in your macOS login Keychain and is not written to the repository or logged.
+
+        You can change it later with Reload API Key in the menu bar.
+        """
+
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        field.placeholderString = "Paste your OpenAI API key"
+        field.usesSingleLineMode = true
+        field.lineBreakMode = .byClipping
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save Key")
+        alert.addButton(withTitle: "Not Now")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
+        let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.count > 20 else {
+            hud.showError("The OpenAI API key is missing or too short")
+            return nil
+        }
+        return value
     }
 
     private func consumeBootstrapAPIKey() throws -> String? {

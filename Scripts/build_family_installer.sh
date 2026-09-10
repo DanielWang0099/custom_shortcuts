@@ -5,34 +5,10 @@ SCRIPT_DIR=${0:A:h}
 PROJECT_DIR=${SCRIPT_DIR:h}
 TEMPLATE_PATH="${SCRIPT_DIR}/family_installer_template.command"
 OUTPUT_DIR="${PROJECT_DIR}/dist"
-OUTPUT_PATH="${OUTPUT_DIR}/AI Shortcuts Family Installer.command"
-KEY_SOURCE_PATH="${HOME}/Documents/GitHub/japanese-practice/vocabulary-flashcard-practice/.env.local"
+OUTPUT_PATH="${OUTPUT_DIR}/AI Shortcuts Installer.command"
 APP_NAME="AI Shortcuts"
 EXECUTABLE_NAME="AIShortcuts"
 BUNDLE_ID="com.susanawang.aishortcuts"
-
-if [[ ! -f "${KEY_SOURCE_PATH}" ]]; then
-    print "The configured API key source is unavailable."
-    exit 1
-fi
-
-API_KEY=$(/usr/bin/awk '
-    /^[[:space:]]*(export[[:space:]]+)?OPENAI_API_KEY[[:space:]]*=/ {
-        value=$0
-        sub(/^[^=]*=/, "", value)
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-        if ((substr(value,1,1)=="\"" && substr(value,length(value),1)=="\"") ||
-            (substr(value,1,1)=="\047" && substr(value,length(value),1)=="\047")) {
-            value=substr(value,2,length(value)-2)
-        }
-        print value
-        exit
-    }
-' "${KEY_SOURCE_PATH}")
-if [[ ${#API_KEY} -le 20 ]]; then
-    print "The configured API key is missing or invalid."
-    exit 1
-fi
 
 cd "${PROJECT_DIR}"
 swift run AIShortcutsCoreChecks
@@ -41,7 +17,7 @@ swift build -c release --product AIShortcuts --triple arm64-apple-macosx13.0
 swift build -c release --product AIShortcuts --triple x86_64-apple-macosx13.0
 
 TEMP_PATH=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/ai-shortcuts-package.XXXXXX")
-trap 'unset API_KEY; /bin/rm -rf "${TEMP_PATH}"' EXIT
+trap '/bin/rm -rf "${TEMP_PATH}"' EXIT
 APP_PATH="${TEMP_PATH}/${APP_NAME}.app"
 CONTENTS_PATH="${APP_PATH}/Contents"
 MACOS_PATH="${CONTENTS_PATH}/MacOS"
@@ -80,21 +56,8 @@ PAYLOAD_ZIP="${TEMP_PATH}/AI-Shortcuts.zip"
 
 /bin/cp "${TEMPLATE_PATH}" "${OUTPUT_PATH}"
 /usr/bin/base64 < "${PAYLOAD_ZIP}" >> "${OUTPUT_PATH}"
-print '__AI_SHORTCUTS_KEY_PAYLOAD__' >> "${OUTPUT_PATH}"
-print -rn -- "${API_KEY}" | /usr/bin/base64 >> "${OUTPUT_PATH}"
 /bin/chmod 700 "${OUTPUT_PATH}"
-
-if /usr/bin/grep -Fq -- "${API_KEY}" "${OUTPUT_PATH}"; then
-    print "Packaging refused because the key appeared as plaintext."
-    exit 1
-fi
-KEY_MARKER_LINE=$(/usr/bin/grep -n '^__AI_SHORTCUTS_KEY_PAYLOAD__$' "${OUTPUT_PATH}" | /usr/bin/cut -d: -f1)
-PACKAGED_KEY=$(/usr/bin/tail -n "+$((KEY_MARKER_LINE + 1))" "${OUTPUT_PATH}" | /usr/bin/base64 -D)
-if [[ "${PACKAGED_KEY}" != "${API_KEY}" ]]; then
-    print "Packaging refused because the key payload did not verify."
-    exit 1
-fi
-unset API_KEY PACKAGED_KEY
 
 print "Created ${OUTPUT_PATH}"
 print "Compatibility: macOS 13+; Apple Silicon and Intel."
+print "No API key is embedded; each user configures their own key on first launch."

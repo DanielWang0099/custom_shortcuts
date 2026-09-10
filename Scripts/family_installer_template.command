@@ -12,7 +12,6 @@ MACOS_PATH="${APP_PATH}/Contents/MacOS"
 AGENT_PATH="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"
 AGENT_TARGET="gui/${UID}/${AGENT_LABEL}"
 SUPPORT_PATH="${HOME}/Library/Application Support/${BUNDLE_ID}"
-BOOTSTRAP_KEY_PATH="${SUPPORT_PATH}/bootstrap-key"
 SCRIPT_PATH=${0:A}
 
 MACOS_MAJOR=$(/usr/bin/sw_vers -productVersion | /usr/bin/awk -F. '{print $1}')
@@ -23,8 +22,7 @@ if (( MACOS_MAJOR < 13 )); then
 fi
 
 APP_MARKER_LINE=$(/usr/bin/grep -n '^__AI_SHORTCUTS_APP_PAYLOAD__$' "${SCRIPT_PATH}" | /usr/bin/cut -d: -f1)
-KEY_MARKER_LINE=$(/usr/bin/grep -n '^__AI_SHORTCUTS_KEY_PAYLOAD__$' "${SCRIPT_PATH}" | /usr/bin/cut -d: -f1)
-if [[ -z "${APP_MARKER_LINE}" || -z "${KEY_MARKER_LINE}" ]]; then
+if [[ -z "${APP_MARKER_LINE}" ]]; then
     print "This installer is incomplete. Ask for a fresh copy."
     read "?Press Return to close."
     exit 1
@@ -36,7 +34,7 @@ PAYLOAD_ZIP="${TEMP_PATH}/AI-Shortcuts.zip"
 EXTRACT_PATH="${TEMP_PATH}/extracted"
 /bin/mkdir -p "${EXTRACT_PATH}"
 
-/usr/bin/sed -n "$((APP_MARKER_LINE + 1)),$((KEY_MARKER_LINE - 1))p" "${SCRIPT_PATH}" \
+/usr/bin/tail -n "+$((APP_MARKER_LINE + 1))" "${SCRIPT_PATH}" \
     | /usr/bin/base64 -D > "${PAYLOAD_ZIP}"
 /usr/bin/ditto -x -k "${PAYLOAD_ZIP}" "${EXTRACT_PATH}"
 SOURCE_APP="${EXTRACT_PATH}/${APP_NAME}.app"
@@ -80,17 +78,11 @@ if [[ -e "${APP_PATH}" ]]; then
     /bin/rm -rf "${APP_PATH}"
 fi
 /usr/bin/ditto "${SOURCE_APP}" "${APP_PATH}"
-/usr/bin/xattr -dr com.apple.quarantine "${APP_PATH}" 2>/dev/null || true
 "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" \
     -f "${APP_PATH}"
 
-umask 077
-/usr/bin/tail -n "+$((KEY_MARKER_LINE + 1))" "${SCRIPT_PATH}" \
-    | /usr/bin/base64 -D > "${BOOTSTRAP_KEY_PATH}"
-/bin/chmod 600 "${BOOTSTRAP_KEY_PATH}"
-
-# The embedded key is consumed by the newly installed app. Remove an older
-# item first because each rebuilt ad-hoc app has a different Keychain ACL.
+# Remove an older item first because each rebuilt ad-hoc app has a different
+# Keychain ACL. The app asks each user for their own key on first launch.
 /usr/bin/security delete-generic-password \
     -s "${KEYCHAIN_SERVICE}" \
     -a "${KEYCHAIN_ACCOUNT}" >/dev/null 2>&1 || true
@@ -117,7 +109,7 @@ launchctl kickstart -k "${AGENT_TARGET}"
 
 print ""
 print "AI Shortcuts is installed and running."
-print "Look for the sparkle in the menu bar, grant the macOS permissions, then confirm the OpenAI disclosure."
+print "Look for the sparkle in the menu bar, grant the macOS permissions, confirm the OpenAI disclosure, then enter your own API key."
 print "If macOS blocks this installer after downloading it, right-click it and choose Open once."
 read "?Press Return to close."
 exit 0

@@ -11,39 +11,48 @@ EXECUTABLE_NAME="AIShortcuts"
 BUNDLE_ID="com.susanawang.aishortcuts"
 KEYCHAIN_SERVICE="com.susanawang.aishortcuts.openai"
 KEYCHAIN_ACCOUNT="default"
-KEY_SOURCE_PATH="${HOME}/Documents/GitHub/japanese-practice/vocabulary-flashcard-practice/.env.local"
 AGENT_LABEL="com.susanawang.aishortcuts"
 AGENT_PATH="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"
 AGENT_TARGET="gui/${UID}/${AGENT_LABEL}"
+SUPPORT_PATH="${HOME}/Library/Application Support/${BUNDLE_ID}"
+BOOTSTRAP_KEY_PATH="${SUPPORT_PATH}/bootstrap-key"
+
+if (( $# > 1 )); then
+  print "Usage: ./Scripts/install.sh [path-to-env-file]"
+  exit 64
+fi
+if [[ "${1:-}" == "--help" ]]; then
+  print "Usage: ./Scripts/install.sh [path-to-env-file]"
+  print ""
+  print "An optional env file supplies OPENAI_API_KEY for this install only."
+  print "Without one, the app asks for your key on first launch."
+  exit 0
+fi
+
+KEY_SOURCE_PATH="${1:-${AI_SHORTCUTS_KEY_FILE:-${PROJECT_DIR}/.env.local}}"
 
 cd "${PROJECT_DIR}"
 
-# A rebuilt local app has a new ad-hoc code signature. Require the configured
-# source key before replacing the old Keychain item, so an install cannot erase
-# the only usable credential when the source file is missing or malformed.
-if [[ ! -f "${KEY_SOURCE_PATH}" ]]; then
-  print "The configured API key source is unavailable."
-  exit 1
-fi
-API_KEY=$(/usr/bin/awk '
-  /^[[:space:]]*(export[[:space:]]+)?OPENAI_API_KEY[[:space:]]*=/ {
-    value=$0
-    sub(/^[^=]*=/, "", value)
-    gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-    if ((substr(value,1,1)=="\"" && substr(value,length(value),1)=="\"") ||
-        (substr(value,1,1)=="\047" && substr(value,length(value),1)=="\047")) {
-      value=substr(value,2,length(value)-2)
+API_KEY="${OPENAI_API_KEY:-}"
+if [[ -z "${API_KEY}" && -f "${KEY_SOURCE_PATH}" ]]; then
+  API_KEY=$(/usr/bin/awk '
+    /^[[:space:]]*(export[[:space:]]+)?OPENAI_API_KEY[[:space:]]*=/ {
+      value=$0
+      sub(/^[^=]*=/, "", value)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      if ((substr(value,1,1)=="\"" && substr(value,length(value),1)=="\"") ||
+          (substr(value,1,1)=="\047" && substr(value,length(value),1)=="\047")) {
+        value=substr(value,2,length(value)-2)
+      }
+      print value
+      exit
     }
-    print value
-    exit
-  }
-' "${KEY_SOURCE_PATH}")
-if [[ ${#API_KEY} -le 20 ]]; then
-  unset API_KEY
-  print "The configured API key is missing or invalid."
-  exit 1
+  ' "${KEY_SOURCE_PATH}")
 fi
-unset API_KEY
+if [[ ${#API_KEY} -le 20 ]]; then
+  API_KEY=""
+fi
+unset OPENAI_API_KEY
 
 swift run AIShortcutsCoreChecks
 swift run AIShortcutsRenderingChecks
@@ -131,14 +140,26 @@ defaults write "${BUNDLE_ID}" permissionsRequested.v1 -bool false
 
 # Rebuilding changes the ad-hoc signature, so an existing generic-password
 # item can retain an ACL for the previous executable. Remove only this app's
-# item; the newly launched app re-imports the validated source key and creates
-# a fresh ACL for its current signature.
+# item; the newly launched app imports the optional bootstrap key or asks for
+# one, then creates a fresh ACL for its current signature.
 /usr/bin/security delete-generic-password \
   -s "${KEYCHAIN_SERVICE}" \
   -a "${KEYCHAIN_ACCOUNT}" >/dev/null 2>&1 || true
+
+if [[ -n "${API_KEY}" ]]; then
+  /bin/mkdir -p "${SUPPORT_PATH}"
+  /bin/chmod 700 "${SUPPORT_PATH}"
+  umask 077
+  print -rn -- "${API_KEY}" > "${BOOTSTRAP_KEY_PATH}"
+  /bin/chmod 600 "${BOOTSTRAP_KEY_PATH}"
+else
+  /bin/rm -f "${BOOTSTRAP_KEY_PATH}" >/dev/null 2>&1 || true
+fi
+unset API_KEY
 
 launchctl bootstrap "gui/${UID}" "${AGENT_PATH}"
 launchctl kickstart -k "${AGENT_TARGET}"
 
 echo "Installed ${APP_PATH}"
 echo "AI Shortcuts is running and will launch automatically at login."
+echo "If no key was supplied, the app will ask for your OpenAI API key on first launch."

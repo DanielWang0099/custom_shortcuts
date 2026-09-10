@@ -6,12 +6,6 @@ enum AppConfiguration {
     static let keychainAccount = "default"
     static let launchAgentLabel = "com.susanawang.aishortcuts"
 
-    static var sourceKeyURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents/GitHub/japanese-practice")
-            .appendingPathComponent("vocabulary-flashcard-practice/.env.local")
-    }
-
     static var bootstrapKeyURL: URL {
         let support = (try? FileManager.default.url(
             for: .applicationSupportDirectory,
