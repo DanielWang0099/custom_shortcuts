@@ -11,13 +11,14 @@ public final class WebRichTextRenderer {
     }
 
     public func render(_ document: AIOutputDocument) -> String {
-        guard (try? AIOutputDocumentValidator.validate(document)) != nil else {
-            return renderPlainText(document.source)
+        let displayDocument = Self.unwrappedTextDocument(from: document) ?? document
+        guard (try? AIOutputDocumentValidator.validate(displayDocument)) != nil else {
+            return renderPlainText(displayDocument.source)
         }
-        guard document.format == .markdown else {
-            return renderPlainText(document.source)
+        guard displayDocument.format == .markdown else {
+            return renderPlainText(displayDocument.source)
         }
-        return renderMarkdown(document.source)
+        return renderMarkdown(displayDocument.source)
     }
 
     public func renderPlainText(_ text: String) -> String {
@@ -636,6 +637,58 @@ public final class WebRichTextRenderer {
             escaped = escaped.replacingOccurrences(of: "\n", with: "<br>\n")
         }
         return escaped
+    }
+
+    private static func unwrappedTextDocument(
+        from document: AIOutputDocument
+    ) -> AIOutputDocument? {
+        guard document.format == .plainText,
+              let data = document.source.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(TextDocumentEnvelope.self, from: data)
+        else {
+            return nil
+        }
+        return AIOutputDocument(format: envelope.format, source: envelope.content)
+    }
+
+    private struct TextDocumentEnvelope: Decodable {
+        let format: AIOutputFormat
+        let content: String
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: Key.self)
+            let keys = Set(container.allKeys.map(\.stringValue))
+            guard keys == ["format", "content"] else {
+                throw DecodingError.dataCorrupted(
+                    .init(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "The text document envelope must contain exactly format and content."
+                    )
+                )
+            }
+            self.format = try container.decode(
+                AIOutputFormat.self,
+                forKey: Key(stringValue: "format")!
+            )
+            self.content = try container.decode(
+                String.self,
+                forKey: Key(stringValue: "content")!
+            )
+        }
+
+        private struct Key: CodingKey {
+            let stringValue: String
+            let intValue: Int?
+
+            init?(stringValue: String) {
+                self.stringValue = stringValue
+                intValue = nil
+            }
+
+            init?(intValue: Int) {
+                return nil
+            }
+        }
     }
 
     private static var resourceBundle: Bundle? {

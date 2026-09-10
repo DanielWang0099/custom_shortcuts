@@ -137,6 +137,19 @@ struct RenderingChecks {
             unsafe.contains("&lt;script&gt;") && !unsafe.contains("<script>alert"),
             "Web transcript rendering did not escape unsafe source content."
         )
+
+        let legacyEnvelope = renderer.render(
+            AIOutputDocument(
+                format: .plainText,
+                source: "{\"format\":\"plain_text\",\"content\":\"Glad it helped!\"}"
+            )
+        )
+        try expect(
+            legacyEnvelope.contains("Glad it helped!")
+                && !legacyEnvelope.contains("format")
+                && !legacyEnvelope.contains("content"),
+            "A structured plain-text envelope was displayed instead of its content."
+        )
     }
 
     private static func mathAttachmentCheck() throws {
