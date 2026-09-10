@@ -15,7 +15,7 @@ enum ShortcutUIStyle {
         srgbRed: 0.105,
         green: 0.110,
         blue: 0.125,
-        alpha: 0.985
+        alpha: 1
     )
     static let raisedSurfaceColor = NSColor(
         srgbRed: 0.155,

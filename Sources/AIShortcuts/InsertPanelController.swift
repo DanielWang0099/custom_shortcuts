@@ -24,7 +24,7 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
     private let statusLabel = NSTextField(labelWithString: "")
 
     private let lookupSurface = NSView()
-    private let libraryRevealButton = ThinLibraryButton()
+    private let libraryRevealButton = LibraryButton()
     private let lookupField = NSTextField()
     private let lookupButton = NSButton()
 
@@ -32,7 +32,7 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
     private let keySurface = NSView()
     private let valueSurface = NSView()
     private let keyField = NSTextField()
-    private let arrowLabel = NSTextField(labelWithString: "→")
+    private let arrowImageView = NSImageView()
     private let valueField = NSTextField()
     private let saveButton = NSButton(title: "Save", target: nil, action: nil)
 
@@ -170,6 +170,10 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
             setFieldSurface(keySurface, focused: true)
         } else if field === valueField {
             setFieldSurface(valueSurface, focused: true)
+        } else if field === lookupField {
+            setFieldSurface(lookupSurface, focused: true)
+        } else if field === searchField {
+            setSearchFieldFocused(true)
         }
     }
 
@@ -181,6 +185,10 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
             setFieldSurface(keySurface, focused: false)
         } else if field === valueField {
             setFieldSurface(valueSurface, focused: false)
+        } else if field === lookupField {
+            setFieldSurface(lookupSurface, focused: false)
+        } else if field === searchField {
+            setSearchFieldFocused(false)
         }
     }
 
@@ -305,9 +313,15 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
         keyField.delegate = self
         valueField.delegate = self
 
-        arrowLabel.font = .systemFont(ofSize: 16, weight: .medium)
-        arrowLabel.textColor = ShortcutUIStyle.accentColor
-        arrowLabel.alignment = .center
+        arrowImageView.image = NSImage(
+            systemSymbolName: "arrow.right",
+            accessibilityDescription: "Maps key to value"
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+        )
+        arrowImageView.contentTintColor = ShortcutUIStyle.accentColor
+        arrowImageView.imageScaling = .scaleProportionallyDown
+        arrowImageView.setAccessibilityLabel("Maps key to value")
 
         configurePillButton(saveButton, title: "Save")
         saveButton.target = self
@@ -316,7 +330,7 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
         keySurface.addSubview(keyField)
         valueSurface.addSubview(valueField)
         createSurface.addSubview(keySurface)
-        createSurface.addSubview(arrowLabel)
+        createSurface.addSubview(arrowImageView)
         createSurface.addSubview(valueSurface)
         createSurface.addSubview(saveButton)
         root.addSubview(createSurface)
@@ -325,10 +339,16 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
     private func configureManagement() {
         searchField.delegate = self
         searchField.focusRingType = .none
+        searchField.isBordered = false
+        searchField.drawsBackground = false
         searchField.font = .systemFont(ofSize: 13.5)
         searchField.textColor = ShortcutUIStyle.primaryTextColor
-        searchField.backgroundColor = ShortcutUIStyle.raisedSurfaceColor
         searchField.placeholderString = "Search keys or values"
+        searchField.wantsLayer = true
+        searchField.layer?.cornerRadius = 17
+        searchField.layer?.backgroundColor = ShortcutUIStyle.raisedSurfaceColor.cgColor
+        searchField.layer?.borderWidth = 1
+        searchField.layer?.borderColor = ShortcutUIStyle.contentBorderColor.cgColor
         searchField.setAccessibilityLabel("Search Insert entries")
 
         scrollView.drawsBackground = false
@@ -376,7 +396,7 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
             panel.makeFirstResponder(searchField)
         case .create:
             titleLabel.stringValue = "New insertion"
-            contextLabel.stringValue = "key  →  value"
+            contextLabel.stringValue = "Key to value"
             keyField.stringValue = ""
             valueField.stringValue = ""
             updateSaveButton()
@@ -406,10 +426,10 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
         let width = panel.frame.width
         let height = panel.frame.height
         titleLabel.frame = NSRect(x: 20, y: height - 39, width: 250, height: 20)
-        backButton.frame = NSRect(x: 14, y: height - 42, width: 24, height: 24)
+        backButton.frame = NSRect(x: 10, y: height - 45, width: 30, height: 30)
         if !backButton.isHidden {
-            titleLabel.frame.origin.x = 42
-            titleLabel.frame.size.width = 228
+            titleLabel.frame.origin.x = 46
+            titleLabel.frame.size.width = 224
         }
         contextLabel.frame = NSRect(x: 270, y: height - 38, width: width - 290, height: 18)
         statusLabel.frame = NSRect(x: 20, y: 12, width: width - 40, height: 16)
@@ -419,16 +439,16 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
         lookupField.frame = NSRect(x: 18, y: 0, width: width - 112, height: 62)
         lookupButton.frame = NSRect(x: width - 72, y: 11, width: 40, height: 40)
         libraryRevealButton.frame = NSRect(
-            x: width / 2 - 34,
+            x: width / 2 - 58,
             y: 0,
-            width: 68,
-            height: 18
+            width: 116,
+            height: 22
         )
 
         createSurface.frame = NSRect(x: 14, y: 30, width: width - 28, height: 66)
         keySurface.frame = NSRect(x: 0, y: 11, width: 177, height: 44)
         keyField.frame = NSRect(x: 14, y: 0, width: 149, height: 44)
-        arrowLabel.frame = NSRect(x: 182, y: 22, width: 24, height: 22)
+        arrowImageView.frame = NSRect(x: 182, y: 22, width: 24, height: 22)
         valueSurface.frame = NSRect(x: 212, y: 11, width: 247, height: 44)
         valueField.frame = NSRect(x: 14, y: 0, width: 219, height: 44)
         saveButton.frame = NSRect(x: 470, y: 15, width: 74, height: 36)
@@ -679,6 +699,13 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
             : ShortcutUIStyle.contentBorderColor.cgColor
     }
 
+    private func setSearchFieldFocused(_ focused: Bool) {
+        searchField.layer?.borderWidth = focused ? 1.5 : 1
+        searchField.layer?.borderColor = focused
+            ? ShortcutUIStyle.focusBorderColor.cgColor
+            : ShortcutUIStyle.contentBorderColor.cgColor
+    }
+
     private func modeViews(for mode: InsertPanelMode) -> [NSView] {
         switch mode {
         case .lookup:
@@ -780,9 +807,9 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
     private let keySurface = NSView()
     private let valueSurface = NSView()
     private let keyField = NSTextField()
-    private let arrowLabel = NSTextField(labelWithString: "→")
+    private let arrowImageView = NSImageView()
     private let valueField = NSTextField()
-    private let actionButton = NSButton()
+    private let actionButton = InsertActionButton()
     private let onSave: (UUID, String, String) -> Void
     private let onDelete: (UUID) -> Void
     private let isDeleting: Bool
@@ -810,10 +837,14 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
         super.init(frame: frame)
 
         ShortcutUIStyle.configureContentSurface(keySurface, cornerRadius: 12)
+        keySurface.layer?.backgroundColor = ShortcutUIStyle.userBubbleColor.cgColor
+        keySurface.layer?.borderColor = ShortcutUIStyle.userBubbleBorderColor.cgColor
         ShortcutUIStyle.configureContentSurface(valueSurface, cornerRadius: 12)
 
         configureField(keyField, value: entry.key, width: 158)
         configureField(valueField, value: entry.value, width: frame.width - 250)
+        keyField.font = .systemFont(ofSize: 13.5, weight: .semibold)
+        valueField.font = .systemFont(ofSize: 13.5)
         keyField.isEditable = !isDeleting && !isBuiltIn
         valueField.isEditable = !isDeleting && !isBuiltIn
         keyField.delegate = self
@@ -823,9 +854,15 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
             valueField.textColor = ShortcutUIStyle.secondaryTextColor
         }
 
-        arrowLabel.font = .systemFont(ofSize: 14, weight: .medium)
-        arrowLabel.textColor = ShortcutUIStyle.accentColor
-        arrowLabel.alignment = .center
+        arrowImageView.image = NSImage(
+            systemSymbolName: "arrow.right",
+            accessibilityDescription: "Maps key to value"
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        )
+        arrowImageView.contentTintColor = ShortcutUIStyle.accentColor
+        arrowImageView.imageScaling = .scaleProportionallyDown
+        arrowImageView.setAccessibilityLabel("Maps key to value")
 
         actionButton.isBordered = false
         actionButton.focusRingType = .none
@@ -849,7 +886,7 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
         keySurface.addSubview(keyField)
         valueSurface.addSubview(valueField)
         addSubview(keySurface)
-        addSubview(arrowLabel)
+        addSubview(arrowImageView)
         addSubview(valueSurface)
         addSubview(actionButton)
     }
@@ -866,7 +903,7 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
         let actionX = bounds.width - actionWidth
         keySurface.frame = NSRect(x: 0, y: 2, width: keyWidth, height: 44)
         keyField.frame = NSRect(x: 12, y: 0, width: keyWidth - 24, height: 44)
-        arrowLabel.frame = NSRect(x: 174, y: 13, width: 22, height: 22)
+        arrowImageView.frame = NSRect(x: 174, y: 13, width: 22, height: 22)
         valueSurface.frame = NSRect(
             x: valueX,
             y: 2,
@@ -898,28 +935,40 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
         let title: String
         let tint: NSColor
         let background: NSColor
+        let hoveredBackground: NSColor
+        let border: NSColor
 
         if isBuiltIn {
             title = "Dynamic"
             tint = ShortcutUIStyle.accentColor
             background = ShortcutUIStyle.accentColor.withAlphaComponent(0.12)
+            hoveredBackground = ShortcutUIStyle.accentColor.withAlphaComponent(0.20)
+            border = ShortcutUIStyle.accentColor.withAlphaComponent(0.26)
         } else if isDeleting || (isBrowsing && !hasChanges) {
             title = "Delete"
             tint = ShortcutUIStyle.warningAccentColor
             background = ShortcutUIStyle.warningAccentColor.withAlphaComponent(0.12)
+            hoveredBackground = ShortcutUIStyle.warningAccentColor.withAlphaComponent(0.20)
+            border = ShortcutUIStyle.warningAccentColor.withAlphaComponent(0.25)
         } else if isBrowsing {
             title = "Modify"
             tint = ShortcutUIStyle.primaryTextColor
-            background = ShortcutUIStyle.accentColor.withAlphaComponent(0.60)
+            background = ShortcutUIStyle.accentColor.withAlphaComponent(0.20)
+            hoveredBackground = ShortcutUIStyle.accentColor.withAlphaComponent(0.30)
+            border = ShortcutUIStyle.accentColor.withAlphaComponent(0.36)
         } else {
             title = "Save"
             tint = ShortcutUIStyle.primaryTextColor
-            background = ShortcutUIStyle.accentColor.withAlphaComponent(0.60)
+            background = ShortcutUIStyle.accentColor.withAlphaComponent(0.20)
+            hoveredBackground = ShortcutUIStyle.accentColor.withAlphaComponent(0.30)
+            border = ShortcutUIStyle.accentColor.withAlphaComponent(0.36)
         }
 
         actionButton.title = title
         actionButton.contentTintColor = tint
-        actionButton.layer?.backgroundColor = background.cgColor
+        actionButton.setBackgroundColors(normal: background, hovered: hoveredBackground)
+        actionButton.layer?.borderWidth = 1
+        actionButton.layer?.borderColor = border.cgColor
         actionButton.setAccessibilityLabel("\(title) insertion")
 
         let validEdit = !keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1047,14 +1096,68 @@ private final class VerticallyCenteredTextFieldCell: NSTextFieldCell {
     }
 }
 
-private final class ThinLibraryButton: NSButton {
+private final class InsertActionButton: NSButton {
+    private var trackingArea: NSTrackingArea?
+    private var isHovered = false
+    private var normalBackgroundColor = NSColor.clear
+    private var hoveredBackgroundColor = NSColor.clear
+
+    func setBackgroundColors(normal: NSColor, hovered: NSColor) {
+        normalBackgroundColor = normal
+        hoveredBackgroundColor = hovered
+        updateBackground()
+    }
+
+    override func updateTrackingAreas() {
+        if let trackingArea {
+            removeTrackingArea(trackingArea)
+        }
+        let options: NSTrackingArea.Options = [
+            .mouseEnteredAndExited,
+            .activeInKeyWindow,
+            .inVisibleRect,
+        ]
+        let trackingArea = NSTrackingArea(rect: bounds, options: options, owner: self)
+        addTrackingArea(trackingArea)
+        self.trackingArea = trackingArea
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        updateBackground()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        updateBackground()
+    }
+
+    private func updateBackground() {
+        layer?.backgroundColor = (isHovered ? hoveredBackgroundColor : normalBackgroundColor).cgColor
+    }
+}
+
+private final class LibraryButton: NSButton {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        title = ""
+        title = "View library"
         isBordered = false
         focusRingType = .none
-        imagePosition = .noImage
+        font = .systemFont(ofSize: 11.5, weight: .medium)
+        contentTintColor = ShortcutUIStyle.secondaryTextColor
+        image = NSImage(
+            systemSymbolName: "list.bullet.rectangle",
+            accessibilityDescription: "View library"
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        )
+        imagePosition = .imageLeading
+        imageScaling = .scaleProportionallyDown
+        alignment = .center
         setButtonType(.momentaryChange)
+        wantsLayer = true
+        layer?.cornerRadius = 8
     }
 
     required init?(coder: NSCoder) {
@@ -1062,17 +1165,15 @@ private final class ThinLibraryButton: NSButton {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let pill = NSRect(
-            x: bounds.midX - 23,
-            y: bounds.midY - 1.5,
-            width: 46,
-            height: 3
-        )
-        let color = isHighlighted
-            ? ShortcutUIStyle.accentColor.withAlphaComponent(0.82)
-            : ShortcutUIStyle.secondaryTextColor.withAlphaComponent(0.56)
-        color.setFill()
-        NSBezierPath(roundedRect: pill, xRadius: 1.5, yRadius: 1.5).fill()
+        if isHighlighted {
+            ShortcutUIStyle.accentColor.withAlphaComponent(0.12).setFill()
+            NSBezierPath(
+                roundedRect: bounds.insetBy(dx: 1, dy: 1),
+                xRadius: 8,
+                yRadius: 8
+            ).fill()
+        }
+        super.draw(dirtyRect)
     }
 
     override func resetCursorRects() {
