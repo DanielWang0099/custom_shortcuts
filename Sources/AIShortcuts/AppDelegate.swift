@@ -19,7 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let finderService = FinderSelectionService()
     private let hud = HUDController()
     private let richTextRenderer = NativeRichTextRenderer()
-    private let apiClient = ResponsesAPIClient()
+    private let apiClient = AIProviderClient()
+    private let modelSettings = ModelSettingsWindowController()
     private let explanationPanel = ExplanationPanelController()
     private let inputLockPanel = InputLockPanelController()
     private let insertPanel = InsertPanelController()
@@ -28,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let inputLockIndicator = InputLockIndicatorController()
     private let clipboardQueueIndicator = ClipboardQueueIndicatorController()
 
-    private var fullBudget: DailyBudgetLedger
+    private lazy var welcomeWindow = WelcomeWindowController(stateStore: stateStore)
     private var hotKeyManager: HotKeyManager?
     private var promptPanel: PromptPanelController?
     private var singleInstanceLock: SingleInstanceLock?
@@ -48,10 +49,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var finderAutomationAuthorization: FinderAutomationAuthorization = .unknown
     private var ignoreInputLockHotKeyUntil = Date.distantPast
     private var insertTargetApplication: NSRunningApplication?
-    private var isShowingEnablementDialog = false
     private var apiKeyLoadAttempted = false
     private var accessibilityRequestIssuedThisRun = false
     private var screenRecordingRequestIssuedThisRun = false
+    private var isUserIntentionalQuit = false
     private lazy var inputLockService = InputLockService { [weak self] in
         Task { @MainActor [weak self] in
             self?.deactivateInputLock(showFeedback: true)
@@ -71,23 +72,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             accessibilityGranted: false,
             screenRecordingGranted: false,
             finderAutomationAuthorization: .unknown,
-            fullBudgetRemaining: 0,
             lastAPIStatus: "Unavailable",
             currentAction: nil,
-            enabledShortcutActions: Set(AIShortcutAction.allCases)
+            enabledShortcutActions: Set(AIShortcutAction.allCases),
+            providerSummary: AIProviderConfiguration.defaultConfiguration(
+                for: .openAICompatible
+            ).summary
         )
     }
 
     override init() {
-        fullBudget = DailyBudgetLedger(
-            limit: AppConstants.fullDailyBudgetLimit,
-            state: stateStore.loadFullBudgetState()
-        )
         super.init()
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        NSApp.applicationIconImage = AIShortcutsLogo.appIconImage()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -98,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         singleInstanceLock = lock
 
+        configureApplicationMenu()
         configureMenuActions()
         _ = statusMenu
 
@@ -112,10 +113,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             logger.error("Global shortcut registration failed.")
         }
 
-        normalizeAndSaveBudgets()
         refreshFinderAutomationAuthorization()
         DispatchQueue.main.async { [weak self] in
-            self?.continueOnboarding()
+            guard let self else { return }
+            if !self.stateStore.welcomeDismissed {
+                self.welcomeWindow.show()
+            }
+            self.continueOnboarding()
         }
     }
 
@@ -128,14 +132,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         inputLockIndicator.dismiss()
         clipboardQueueService.deactivate(notify: false)
         clipboardQueueIndicator.dismiss()
+
+        if !isUserIntentionalQuit && (screenRecordingRequestIssuedThisRun || accessibilityRequestIssuedThisRun) {
+            logger.notice("Relaunching AI Shortcuts following privacy permission update.")
+            relaunchAfterTermination()
+        }
+    }
+
+    private func relaunchAfterTermination() {
+        let bundleURL = Bundle.main.bundleURL
+        let bundlePath = bundleURL.path
+        let command: String
+        if bundlePath.hasSuffix(".app") {
+            command = "sleep 0.5; open -a '\(bundlePath)'"
+        } else {
+            let executablePath = CommandLine.arguments[0]
+            command = "sleep 0.5; '\(executablePath)'"
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
     }
 
     private func configureMenuActions() {
-        statusMenu.onEnable = { [weak self] in
-            self?.continueOnboarding(userInitiated: true)
+        statusMenu.onOpenWelcome = { [weak self] in
+            self?.welcomeWindow.show()
         }
-        statusMenu.onOpenDataSettings = {
-            NSWorkspace.shared.open(AppConfiguration.dataSharingSettingsURL)
+        welcomeWindow.onOpenModelSettings = { [weak self] in
+            self?.showModelSettings()
+        }
+        statusMenu.onOpenModelSettings = { [weak self] in
+            self?.showModelSettings()
         }
         statusMenu.onReloadKey = { [weak self] in
             self?.loadOrImportAPIKey(showFeedback: true, forceImport: true)
@@ -158,71 +189,135 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusMenu.onToggleShortcut = { [weak self] action, enabled in
             self?.setShortcut(action, enabled: enabled)
         }
-        statusMenu.onQuit = {
+        statusMenu.onQuit = { [weak self] in
+            self?.isUserIntentionalQuit = true
             NSApp.terminate(nil)
         }
     }
 
+    private func configureApplicationMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu(title: "AI Shortcuts")
+        let aboutItem = NSMenuItem(title: "About AI Shortcuts", action: #selector(openWelcomeWindow), keyEquivalent: "")
+        aboutItem.target = self
+        appMenu.addItem(aboutItem)
+        appMenu.addItem(NSMenuItem.separator())
+        let settingsItem = NSMenuItem(title: "Model Settings…", action: #selector(openSettingsFromMenu), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
+        appMenu.addItem(NSMenuItem.separator())
+        let quitItem = NSMenuItem(title: "Quit AI Shortcuts", action: #selector(quitFromMenu), keyEquivalent: "q")
+        quitItem.target = self
+        appMenu.addItem(quitItem)
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+
+        let undoItem = NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redoItem = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        let cutItem = NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        let selectAllItem = NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        editMenu.addItem(undoItem)
+        editMenu.addItem(redoItem)
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(cutItem)
+        editMenu.addItem(copyItem)
+        editMenu.addItem(pasteItem)
+        editMenu.addItem(selectAllItem)
+
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func openWelcomeWindow() {
+        welcomeWindow.show()
+    }
+
+    @objc private func openSettingsFromMenu() {
+        showModelSettings()
+    }
+
+    @objc private func quitFromMenu() {
+        isUserIntentionalQuit = true
+        NSApp.terminate(nil)
+    }
+
     private func menuSnapshot() -> StatusMenuSnapshot {
-        normalizeAndSaveBudgets()
+        let provider = stateStore.aiProvider
+        let configuration = stateStore.aiProviderConfiguration(for: provider)
+        let keyReady = apiKey != nil
+        let accessibilityGranted = AXIsProcessTrusted()
         return StatusMenuSnapshot(
             busy: isBusy,
-            enabled: stateStore.dataSharingAcknowledged,
-            keyReady: apiKey != nil,
-            accessibilityGranted: AXIsProcessTrusted(),
+            enabled: keyReady && accessibilityGranted,
+            keyReady: keyReady,
+            accessibilityGranted: accessibilityGranted,
             screenRecordingGranted: CGPreflightScreenCaptureAccess(),
             finderAutomationAuthorization: finderAutomationAuthorization,
-            fullBudgetRemaining: fullBudget.remaining,
             lastAPIStatus: lastAPIStatus,
             currentAction: currentAction?.displayName,
-            enabledShortcutActions: stateStore.enabledShortcutActions
+            enabledShortcutActions: stateStore.enabledShortcutActions,
+            providerSummary: configuration.summary
         )
     }
 
-    private func showEnablementDialog() {
-        guard !isShowingEnablementDialog else {
+    private func showModelSettings() {
+        guard !isBusy else {
+            hud.showBusy()
             return
         }
-        isShowingEnablementDialog = true
-        defer { isShowingEnablementDialog = false }
+        let configurations = Dictionary(uniqueKeysWithValues: AIProvider.allCases.map { provider in
+            (provider, stateStore.aiProviderConfiguration(for: provider))
+        })
+        modelSettings.show(
+            configurations: configurations,
+            selectedProvider: stateStore.aiProvider
+        ) { [weak self] configuration, apiKey in
+            self?.saveModelSettings(configuration, apiKey: apiKey)
+        }
+    }
 
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Enable AI Shortcuts"
-        alert.informativeText = """
-        What happens
-        Selected text, cropped screenshots, images pasted into Explain, and Insert key labels used for ambiguous lookup
-        are sent to OpenAI using your own API key. Saved Insert values stay local and are never sent.
-
-        Before continuing
-        Review the billing and data controls for the OpenAI project that owns your key. Every shortcut uses GPT-5.4
-        and has a 1,000,000-token local UTC-day guard. The app cannot see usage from other apps.
-
-        Privacy and billing
-        Requests may be billed to your OpenAI project. Do not send sensitive, confidential, or proprietary content.
-        Choose “I Confirm” only after reviewing the data controls and billing settings for your project.
-        """
-        alert.addButton(withTitle: "I Confirm")
-        alert.addButton(withTitle: "Open Data Settings")
-        alert.addButton(withTitle: "Not Now")
-
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            stateStore.dataSharingAcknowledged = true
-            if loadOrImportAPIKey(showFeedback: false) {
-                hud.showSuccess()
+    private func saveModelSettings(
+        _ configuration: AIProviderConfiguration,
+        apiKey: String?
+    ) {
+        guard configuration.validationMessage == nil else {
+            hud.showError(configuration.validationMessage ?? "Model settings are invalid.")
+            return
+        }
+        let trimmedAPIKey = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedAPIKey, !trimmedAPIKey.isEmpty, trimmedAPIKey.count <= 20 {
+            hud.showError("The API key looks too short.")
+            return
+        }
+        do {
+            if let trimmedAPIKey, !trimmedAPIKey.isEmpty {
+                try keychainStore.save(trimmedAPIKey, for: configuration.provider)
             }
-        case .alertSecondButtonReturn:
-            NSWorkspace.shared.open(AppConfiguration.dataSharingSettingsURL)
-        default:
-            break
+            let selectedAPIKey = try keychainStore.read(for: configuration.provider)
+            stateStore.saveAIProviderConfiguration(configuration)
+            stateStore.aiProvider = configuration.provider
+            apiKeyLoadAttempted = true
+            self.apiKey = selectedAPIKey
+            hud.showSuccess(text: "Model settings saved")
+        } catch {
+            self.apiKey = nil
+            hud.showError(error.localizedDescription)
+            logger.error("Model settings could not be saved.")
         }
     }
 
     private func continueOnboarding(userInitiated: Bool = false) {
-        guard !isShowingEnablementDialog else {
-            return
-        }
         if !stateStore.permissionsRequested {
             stateStore.permissionsRequested = true
         }
@@ -239,9 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        if !stateStore.dataSharingAcknowledged {
-            showEnablementDialog()
-        } else if !apiKeyLoadAttempted {
+        if !apiKeyLoadAttempted {
             loadOrImportAPIKey(showFeedback: false)
         }
     }
@@ -282,17 +375,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         forceImport: Bool = false
     ) -> Bool {
         apiKeyLoadAttempted = true
+        let provider = stateStore.aiProvider
         do {
-            if let bootstrapped = try consumeBootstrapAPIKey() {
-                try keychainStore.save(bootstrapped)
+            if provider != .openAICompatible {
+                try? FileManager.default.removeItem(at: AppConfiguration.bootstrapKeyURL)
+            }
+            if provider == .openAICompatible, let bootstrapped = try consumeBootstrapAPIKey() {
+                try keychainStore.save(bootstrapped, for: provider)
                 apiKey = bootstrapped
-            } else if !forceImport, let existing = try keychainStore.read() {
+            } else if !forceImport, let existing = try keychainStore.read(for: provider) {
                 apiKey = existing
             } else {
-                guard let entered = promptForAPIKey() else {
+                guard let entered = promptForAPIKey(for: provider) else {
                     return false
                 }
-                try keychainStore.save(entered)
+                try keychainStore.save(entered, for: provider)
                 apiKey = entered
             }
             if showFeedback {
@@ -309,18 +406,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func promptForAPIKey() -> String? {
+    private func promptForAPIKey(for provider: AIProvider) -> String? {
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "Add your OpenAI API key"
+        alert.messageText = "Add your \(provider.displayName) API key"
         alert.informativeText = """
-        AI Shortcuts uses your own OpenAI project. The key is stored in your macOS login Keychain and is not written to the repository or logged.
+        AI Shortcuts uses your own \(provider.displayName) account. The key is stored in your macOS login Keychain and is not written to the repository or logged.
 
         You can change it later with Reload API Key in the menu bar.
         """
 
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        field.placeholderString = "Paste your OpenAI API key"
+        field.placeholderString = "Paste your API key"
         field.usesSingleLineMode = true
         field.lineBreakMode = .byClipping
         alert.accessoryView = field
@@ -332,7 +429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard value.count > 20 else {
-            hud.showError("The OpenAI API key is missing or too short")
+            hud.showError("The API key is missing or too short")
             return nil
         }
         return value
@@ -392,13 +489,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hud.showBusy()
             return
         }
-        guard stateStore.dataSharingAcknowledged else {
-            hud.showError("Enable AI Shortcuts from the menu bar first")
-            return
-        }
-        if action.requiresOpenAI {
+        if action.requiresAIProvider {
             guard apiKey != nil else {
-                hud.showError("OpenAI API key is unavailable")
+                hud.showError("API key is unavailable")
                 return
             }
         }
@@ -531,12 +624,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return
         }
-        guard stateStore.dataSharingAcknowledged else {
-            insertPanel.showLookupError("No exact match · enable AI Shortcuts for smart matching")
-            return
-        }
         guard apiKey != nil else {
-            insertPanel.showLookupError("No exact match · OpenAI API key is unavailable")
+            insertPanel.showLookupError("No exact match · API key is unavailable")
             return
         }
 
@@ -556,10 +645,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             query: query,
             candidateKeys: entries.map(\.smartLookupLabel)
         )
-        guard reserve(TokenEstimator.textReservation(for: prompt), for: .insert) else {
-            insertPanel.showLookupError("Daily AI budget guard reached")
-            return
-        }
         do {
             let completion = try await callAPI(prompt: prompt)
             let response = completion.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -679,14 +764,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             let prompt = PromptBuilder.make(action: .ocr)
-            let reservation = TokenEstimator.imageReservation(
-                for: prompt,
-                pixelWidth: capture.pixelWidth,
-                pixelHeight: capture.pixelHeight
-            )
-            guard reserve(reservation, for: .ocr) else {
-                return
-            }
             let completion = try await callAPI(prompt: prompt, imagePNGs: [capture.pngData])
             guard !completion.output.isEmpty else {
                 lastAPIStatus = "No OCR text"
@@ -753,14 +830,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: .calculate,
             parameter: instruction
         )
-        let reservation = TokenEstimator.imageReservation(
-            for: prompt,
-            pixelWidth: capture.pixelWidth,
-            pixelHeight: capture.pixelHeight
-        )
-        guard reserve(reservation, for: .calculate) else {
-            return
-        }
 
         do {
             let completion = try await callAPI(prompt: prompt, imagePNGs: [capture.pngData])
@@ -924,10 +993,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selectedText: snapshot.text,
             parameter: parameter
         )
-        let reservation = TokenEstimator.textReservation(for: prompt)
-        guard reserve(reservation, for: action) else {
-            return
-        }
 
         do {
             let completion = try await callAPI(prompt: prompt)
@@ -1056,20 +1121,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             parameter: modelRequest,
             conversationContext: explanationMemory.context()
         )
-        let pixelSizes = imagePNGs.compactMap(Self.pixelSize(ofPNG:))
-        let reservation = imagePNGs.isEmpty
-            ? TokenEstimator.textReservation(for: prompt)
-            : TokenEstimator.multimodalReservation(for: prompt, pixelSizes: pixelSizes)
-        guard reserve(reservation, for: .explain, showFeedback: false) else {
-            pendingExplanationSelection = snapshot
-            explanationPanel.showError(
-                "The GPT-5.4 daily guard blocked this request.",
-                retryRequest: request,
-                retryImagePNGs: imagePNGs,
-                hasHiddenSelection: snapshot != nil
-            )
-            return
-        }
 
         do {
             let completion = try await callAPI(prompt: prompt, imagePNGs: imagePNGs)
@@ -1096,31 +1147,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func reserve(
-        _ amount: Int,
-        for action: AIShortcutAction,
-        showFeedback: Bool = true
-    ) -> Bool {
-        switch fullBudget.reserve(amount) {
-        case let .reserved(state):
-            stateStore.saveFullBudgetState(state)
-            return true
-        case let .refused(remaining, requested):
-            lastAPIStatus = "GPT-5.4 budget blocked"
-            if showFeedback {
-                hud.showError(
-                    "GPT-5.4 daily guard blocked \(requested.formatted()) tokens; \(remaining.formatted()) remain"
-                )
-            }
-            return false
-        }
-    }
-
-    private func normalizeAndSaveBudgets() {
-        fullBudget.normalize()
-        stateStore.saveFullBudgetState(fullBudget.state)
-    }
-
     private func callAPI(
         prompt: PromptSpec,
         imagePNGs: [Data] = []
@@ -1128,13 +1154,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let apiKey else {
             throw KeySourceError.missingKey
         }
+        let configuration = stateStore.aiProviderConfiguration(for: stateStore.aiProvider)
         let start = Date()
         do {
             let completion = try await apiClient.complete(
                 prompt: prompt,
                 imagePNGs: imagePNGs,
                 apiKey: apiKey,
-                safetyIdentifier: stateStore.safetyIdentifier
+                safetyIdentifier: stateStore.safetyIdentifier,
+                configuration: configuration
             )
             lastAPIStatus = "Success"
             let milliseconds = Int(Date().timeIntervalSince(start) * 1_000)
@@ -1165,9 +1193,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .networkConnectionLost:
                 return "Connection was interrupted — press Enter to retry."
             case .timedOut:
-                return "OpenAI took too long — press Enter to retry."
+                return "The AI provider took too long — press Enter to retry."
             default:
-                return "OpenAI connection failed — press Enter to retry."
+                return "The AI provider connection failed — press Enter to retry."
             }
         }
         return error.localizedDescription

@@ -4,7 +4,7 @@ import Foundation
 final class SingleInstanceLock {
     private let fileDescriptor: Int32
 
-    init?() {
+    init?(timeout: TimeInterval = 2.0) {
         let directory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/AI Shortcuts")
         do {
@@ -21,7 +21,23 @@ final class SingleInstanceLock {
         guard descriptor >= 0 else {
             return nil
         }
-        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+
+        let deadline = Date().addingTimeInterval(timeout)
+        var acquired = false
+        while true {
+            if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+                acquired = true
+                break
+            }
+            if Date() >= deadline {
+                break
+            }
+            // Sleep 50ms before retrying in case a previous instance is shutting down
+            // (e.g. macOS "Quit & Reopen" when granting screen recording permissions)
+            usleep(50_000)
+        }
+
+        guard acquired else {
             close(descriptor)
             return nil
         }

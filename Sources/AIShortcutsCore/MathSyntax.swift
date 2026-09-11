@@ -167,33 +167,36 @@ public enum MathSyntax {
             }
 
             if source[index...].hasPrefix("\\(") {
-                guard source.range(
+                guard let closingRange = source.range(
                     of: "\\)",
-                    range: source.index(after: index)..<source.endIndex
-                ) != nil else {
+                    range: source.index(index, offsetBy: 2)..<source.endIndex
+                ) else {
                     return true
                 }
-                index = source.index(index, offsetBy: 2)
+                index = closingRange.upperBound
+                isLineStart = false
                 continue
             }
             if source[index...].hasPrefix("\\[") {
-                guard source.range(
+                guard let closingRange = source.range(
                     of: "\\]",
-                    range: source.index(after: index)..<source.endIndex
-                ) != nil else {
+                    range: source.index(index, offsetBy: 2)..<source.endIndex
+                ) else {
                     return true
                 }
-                index = source.index(index, offsetBy: 2)
+                index = closingRange.upperBound
+                isLineStart = false
                 continue
             }
             if source[index...].hasPrefix("$$") {
-                guard source.range(
+                guard let closingRange = source.range(
                     of: "$$",
                     range: source.index(index, offsetBy: 2)..<source.endIndex
-                ) != nil else {
+                ) else {
                     return true
                 }
-                index = source.index(index, offsetBy: 2)
+                index = closingRange.upperBound
+                isLineStart = false
                 continue
             }
             if character == "$",
@@ -203,12 +206,15 @@ public enum MathSyntax {
                nextCharacter(in: source, after: index)?.isNumber != true
             {
                 let lineEnd = endOfLine(in: source, from: index)
-                guard source.range(
+                guard let closingRange = source.range(
                     of: "$",
                     range: source.index(after: index)..<lineEnd
-                ) != nil else {
+                ) else {
                     return true
                 }
+                index = closingRange.upperBound
+                isLineStart = false
+                continue
             }
             index = source.index(after: index)
         }

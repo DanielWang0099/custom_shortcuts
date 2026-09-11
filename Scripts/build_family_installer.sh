@@ -9,6 +9,7 @@ OUTPUT_PATH="${OUTPUT_DIR}/AI Shortcuts Installer.command"
 APP_NAME="AI Shortcuts"
 EXECUTABLE_NAME="AIShortcuts"
 BUNDLE_ID="com.susanawang.aishortcuts"
+ICON_PATH="${PROJECT_DIR}/Resources/AIShortcutsLogo.icns"
 
 cd "${PROJECT_DIR}"
 swift run AIShortcutsCoreChecks
@@ -26,6 +27,10 @@ if [[ ! -d "${RENDERING_RESOURCE_BUNDLE}" ]]; then
     print "The bundled transcript renderer resources were not built."
     exit 1
 fi
+if [[ ! -f "${ICON_PATH}" ]]; then
+    print "The AI Shortcuts app icon is missing."
+    exit 1
+fi
 /bin/mkdir -p "${MACOS_PATH}" "${CONTENTS_PATH}/Resources" "${OUTPUT_DIR}"
 
 /usr/bin/lipo -create \
@@ -34,12 +39,14 @@ fi
     -output "${MACOS_PATH}/${EXECUTABLE_NAME}"
 /bin/chmod 755 "${MACOS_PATH}/${EXECUTABLE_NAME}"
 /usr/bin/ditto "${RENDERING_RESOURCE_BUNDLE}" "${CONTENTS_PATH}/Resources/$(basename "${RENDERING_RESOURCE_BUNDLE}")"
+/bin/cp "${ICON_PATH}" "${CONTENTS_PATH}/Resources/AIShortcutsLogo.icns"
 
 INFO_PLIST="${CONTENTS_PATH}/Info.plist"
 /usr/bin/plutil -create xml1 "${INFO_PLIST}"
 /usr/bin/plutil -insert CFBundleDevelopmentRegion -string "en" "${INFO_PLIST}"
 /usr/bin/plutil -insert CFBundleDisplayName -string "${APP_NAME}" "${INFO_PLIST}"
 /usr/bin/plutil -insert CFBundleExecutable -string "${EXECUTABLE_NAME}" "${INFO_PLIST}"
+/usr/bin/plutil -insert CFBundleIconFile -string "AIShortcutsLogo.icns" "${INFO_PLIST}"
 /usr/bin/plutil -insert CFBundleIdentifier -string "${BUNDLE_ID}" "${INFO_PLIST}"
 /usr/bin/plutil -insert CFBundleInfoDictionaryVersion -string "6.0" "${INFO_PLIST}"
 /usr/bin/plutil -insert CFBundleName -string "${APP_NAME}" "${INFO_PLIST}"

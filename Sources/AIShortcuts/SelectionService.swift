@@ -18,7 +18,7 @@ final class SelectionService {
         let frontmost = NSWorkspace.shared.frontmostApplication
         let processIdentifier = frontmost?.processIdentifier ?? 0
 
-        if let element = focusedElement(),
+        if let element = focusedElement(for: processIdentifier),
            let selectedText = selectedText(from: element),
            !selectedText.isEmpty
         {
@@ -67,11 +67,10 @@ final class SelectionService {
         _ text: String,
         into application: NSRunningApplication?
     ) async -> Bool {
-        guard let application,
-              await waitForShortcutModifiersToRelease()
-        else {
+        guard let application else {
             return false
         }
+        await waitForShortcutModifiersToRelease()
 
         let pasteboard = NSPasteboard.general
         let backup = PasteboardBackup(pasteboard: pasteboard)
@@ -92,7 +91,7 @@ final class SelectionService {
 
         placeOnClipboard(text)
         try? await Task.sleep(nanoseconds: 25_000_000)
-        postKey(keyCode: 9, flags: .maskCommand) // V
+        await postKey(keyCode: 9, flags: .maskCommand) // V
         // Most applications consume Paste synchronously, but a short grace
         // period protects controls that read the pasteboard on the next turn.
         try? await Task.sleep(nanoseconds: 220_000_000)
@@ -175,26 +174,93 @@ final class SelectionService {
         else {
             return false
         }
-        postKey(keyCode: 9, flags: .maskCommand) // V
+        await postKey(keyCode: 9, flags: .maskCommand) // V
         return true
     }
 
-    private func focusedElement() -> AXUIElement? {
+    private func focusedElement(for processIdentifier: pid_t) -> AXUIElement? {
         let systemWide = AXUIElementCreateSystemWide()
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        if AXUIElementCopyAttributeValue(
             systemWide,
             kAXFocusedUIElementAttribute as CFString,
             &value
         ) == .success,
             let value
-        else {
+        {
+            return (value as! AXUIElement)
+        }
+
+        guard processIdentifier > 0 else {
             return nil
         }
-        return (value as! AXUIElement)
+        let appElement = AXUIElementCreateApplication(processIdentifier)
+        if AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &value
+        ) == .success,
+            let value
+        {
+            return (value as! AXUIElement)
+        }
+
+        var windowValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedWindowAttribute as CFString,
+            &windowValue
+        ) == .success,
+            let windowValue
+        {
+            let windowElement = windowValue as! AXUIElement
+            if AXUIElementCopyAttributeValue(
+                windowElement,
+                kAXFocusedUIElementAttribute as CFString,
+                &value
+            ) == .success,
+                let value
+            {
+                return (value as! AXUIElement)
+            }
+            return windowElement
+        }
+
+        return nil
     }
 
     private func selectedText(from element: AXUIElement) -> String? {
+        if let directText = extractSelectedText(from: element) {
+            return directText
+        }
+
+        // Chromium and WebKit browsers (e.g. Safari, Arc, Chrome) or document
+        // views often attach the selected text attribute to an enclosing container
+        // (such as an AXWebArea, AXScrollArea, or AXDocument) rather than the
+        // clicked static text node. Walk up the ancestor chain to find it.
+        var current = element
+        for _ in 0..<6 {
+            var parentValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(
+                current,
+                kAXParentAttribute as CFString,
+                &parentValue
+            ) == .success,
+                let parentValue
+            else {
+                break
+            }
+            let parent = (parentValue as! AXUIElement)
+            if let parentText = extractSelectedText(from: parent) {
+                return parentText
+            }
+            current = parent
+        }
+
+        return nil
+    }
+
+    private func extractSelectedText(from element: AXUIElement) -> String? {
         var value: CFTypeRef?
         if AXUIElementCopyAttributeValue(
             element,
@@ -255,15 +321,16 @@ final class SelectionService {
         preserveClipboard: Bool,
         expectedProcessIdentifier: pid_t
     ) async -> String? {
-        guard await waitForShortcutModifiersToRelease(),
-              NSWorkspace.shared.frontmostApplication?.processIdentifier
+        await waitForShortcutModifiersToRelease()
+
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier
                 == expectedProcessIdentifier
         else {
             return nil
         }
         // Let the source application finish handling the Carbon hotkey-release
         // event before asking it to process a synthetic Copy.
-        try? await Task.sleep(nanoseconds: 25_000_000)
+        try? await Task.sleep(nanoseconds: 20_000_000)
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier
                 == expectedProcessIdentifier
         else {
@@ -271,55 +338,71 @@ final class SelectionService {
         }
 
         let pasteboard = NSPasteboard.general
-        let backup = preserveClipboard ? PasteboardBackup(pasteboard: pasteboard) : nil
+        // Always back up the pasteboard so we can restore it if copying fails,
+        // preventing probe marker strings from corrupting user clipboard history.
+        let backup = PasteboardBackup(pasteboard: pasteboard)
+        var shouldRestoreBackup = true
         defer {
-            backup?.restore(to: pasteboard)
+            if shouldRestoreBackup {
+                backup.restore(to: pasteboard)
+            }
         }
+
         let marker = "com.susanawang.aishortcuts.copy-probe.\(UUID().uuidString)"
         pasteboard.clearContents()
         pasteboard.setString(marker, forType: .string)
         let markerChangeCount = pasteboard.changeCount
-        postKey(keyCode: 8, flags: .maskCommand) // C
+        await postKey(keyCode: 8, flags: .maskCommand) // C
 
-        for attempt in 0..<15 {
-            if pasteboard.changeCount != markerChangeCount,
-               let copied = pasteboard.string(forType: .string),
-               copied != marker
-            {
-                return copied
+        // Poll for up to 525ms (35 * 15ms) to accommodate multi-process IPC
+        // latency in web browsers (Safari, Chrome) and Electron apps (ChatGPT, Slack).
+        for attempt in 0..<35 {
+            if pasteboard.changeCount != markerChangeCount {
+                let copied = pasteboard.string(forType: .string)
+                    ?? (pasteboard.readObjects(forClasses: [NSString.self], options: nil)?.first as? String)
+                if let copied,
+                   copied != marker,
+                   !copied.isEmpty
+                {
+                    shouldRestoreBackup = preserveClipboard
+                    return copied
+                }
             }
-            if attempt == 7,
+            if (attempt == 8 || attempt == 18),
                NSWorkspace.shared.frontmostApplication?.processIdentifier
                     == expectedProcessIdentifier
             {
-                postKey(keyCode: 8, flags: .maskCommand)
+                await postKey(keyCode: 8, flags: .maskCommand)
             }
             try? await Task.sleep(nanoseconds: 15_000_000)
         }
         return nil
     }
 
-    private func waitForShortcutModifiersToRelease() async -> Bool {
+    private func waitForShortcutModifiersToRelease() async {
         let shortcutModifiers: CGEventFlags = [
             .maskCommand,
             .maskAlternate,
             .maskControl,
         ]
-        for _ in 0..<30 {
+        // Allow up to 250ms for natural user key release without ever aborting early.
+        for _ in 0..<25 {
             if Task.isCancelled {
-                return false
+                return
             }
             let current = CGEventSource.flagsState(.combinedSessionState)
             if current.intersection(shortcutModifiers).isEmpty {
-                return true
+                return
             }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
-        return false
     }
 
-    private func postKey(keyCode: CGKeyCode, flags: CGEventFlags) {
-        let source = CGEventSource(stateID: .combinedSessionState)
+    private func postKey(keyCode: CGKeyCode, flags: CGEventFlags) async {
+        // Use a private event source (stateID: -1) so the synthetic event is isolated
+        // from physical modifier key states in combinedSessionState / hidSystemState.
+        let source = CGEventSource(stateID: CGEventSourceStateID(rawValue: -1)!)
+            ?? CGEventSource(stateID: .hidSystemState)
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
         else {
@@ -327,7 +410,11 @@ final class SelectionService {
         }
         down.flags = flags
         up.flags = flags
+
         down.post(tap: .cghidEventTap)
+        // Brief 12ms pause ensures target application event loops (e.g. Chromium / WebKit)
+        // properly register the key-down before receiving the key-up.
+        try? await Task.sleep(nanoseconds: 12_000_000)
         up.post(tap: .cghidEventTap)
     }
 }

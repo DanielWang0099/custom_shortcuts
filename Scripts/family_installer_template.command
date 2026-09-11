@@ -5,6 +5,7 @@ APP_NAME="AI Shortcuts"
 BUNDLE_ID="com.susanawang.aishortcuts"
 EXECUTABLE_NAME="AIShortcuts"
 KEYCHAIN_SERVICE="com.susanawang.aishortcuts.openai"
+ANTHROPIC_KEYCHAIN_SERVICE="com.susanawang.aishortcuts.anthropic"
 KEYCHAIN_ACCOUNT="default"
 AGENT_LABEL="com.susanawang.aishortcuts"
 APP_PATH="${HOME}/Applications/${APP_NAME}.app"
@@ -81,11 +82,12 @@ fi
 "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" \
     -f "${APP_PATH}"
 
-# Remove an older item first because each rebuilt ad-hoc app has a different
-# Keychain ACL. The app asks each user for their own key on first launch.
-/usr/bin/security delete-generic-password \
-    -s "${KEYCHAIN_SERVICE}" \
-    -a "${KEYCHAIN_ACCOUNT}" >/dev/null 2>&1 || true
+# Preserve existing Keychain keys so updating the app does not wipe configured keys.
+if ! /usr/bin/security find-generic-password -s "${KEYCHAIN_SERVICE}" -a "${KEYCHAIN_ACCOUNT}" >/dev/null 2>&1; then
+    /usr/bin/security delete-generic-password \
+        -s "${KEYCHAIN_SERVICE}" \
+        -a "${KEYCHAIN_ACCOUNT}" >/dev/null 2>&1 || true
+fi
 
 /usr/bin/plutil -create xml1 "${AGENT_PATH}"
 /usr/bin/plutil -insert Label -string "${AGENT_LABEL}" "${AGENT_PATH}"
@@ -109,7 +111,7 @@ launchctl kickstart -k "${AGENT_TARGET}"
 
 print ""
 print "AI Shortcuts is installed and running."
-print "Look for the sparkle in the menu bar, grant the macOS permissions, confirm the OpenAI disclosure, then enter your own API key."
+print "Look for the AI Shortcuts logo in the menu bar, grant the macOS permissions, confirm the provider disclosure, then enter your own API key."
 print "If macOS blocks this installer after downloading it, right-click it and choose Open once."
 read "?Press Return to close."
 exit 0

@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import AIShortcutsCore
 
 enum KeychainError: LocalizedError {
     case unexpectedStatus(OSStatus)
@@ -17,9 +18,13 @@ enum KeychainError: LocalizedError {
 
 struct KeychainStore {
     func read() throws -> String? {
+        try read(for: .openAICompatible)
+    }
+
+    func read(for provider: AIProvider) throws -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: AppConfiguration.keychainService,
+            kSecAttrService as String: AppConfiguration.keychainService(for: provider),
             kSecAttrAccount as String: AppConfiguration.keychainAccount,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
@@ -43,15 +48,19 @@ struct KeychainStore {
     }
 
     func save(_ value: String) throws {
+        try save(value, for: .openAICompatible)
+    }
+
+    func save(_ value: String, for provider: AIProvider) throws {
         let keyData = Data(value.utf8)
         let identity: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: AppConfiguration.keychainService,
+            kSecAttrService as String: AppConfiguration.keychainService(for: provider),
             kSecAttrAccount as String: AppConfiguration.keychainAccount,
         ]
         let attributes: [String: Any] = [
             kSecValueData as String: keyData,
-            kSecAttrLabel as String: "AI Shortcuts OpenAI API key",
+            kSecAttrLabel as String: "AI Shortcuts \(provider.displayName) API key",
             kSecAttrDescription as String: "Used by the local AI Shortcuts app",
         ]
 

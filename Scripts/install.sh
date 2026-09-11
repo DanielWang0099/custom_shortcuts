@@ -10,6 +10,7 @@ MACOS_PATH="${CONTENTS_PATH}/MacOS"
 EXECUTABLE_NAME="AIShortcuts"
 BUNDLE_ID="com.susanawang.aishortcuts"
 KEYCHAIN_SERVICE="com.susanawang.aishortcuts.openai"
+ANTHROPIC_KEYCHAIN_SERVICE="com.susanawang.aishortcuts.anthropic"
 KEYCHAIN_ACCOUNT="default"
 AGENT_LABEL="com.susanawang.aishortcuts"
 AGENT_PATH="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"
@@ -59,8 +60,13 @@ swift run AIShortcutsRenderingChecks
 swift build -c release --product AIShortcuts
 BIN_PATH=$(swift build -c release --show-bin-path)
 RENDERING_RESOURCE_BUNDLE="${BIN_PATH}/AIShortcuts_AIShortcutsRendering.bundle"
+ICON_PATH="${PROJECT_DIR}/Resources/AIShortcutsLogo.icns"
 if [[ ! -d "${RENDERING_RESOURCE_BUNDLE}" ]]; then
   print "The bundled transcript renderer resources were not built."
+  exit 1
+fi
+if [[ ! -f "${ICON_PATH}" ]]; then
+  print "The AI Shortcuts app icon is missing."
   exit 1
 fi
 
@@ -100,6 +106,7 @@ fi
 mkdir -p "${MACOS_PATH}" "${CONTENTS_PATH}/Resources"
 cp "${BIN_PATH}/${EXECUTABLE_NAME}" "${MACOS_PATH}/${EXECUTABLE_NAME}"
 cp -R "${RENDERING_RESOURCE_BUNDLE}" "${CONTENTS_PATH}/Resources/"
+cp "${ICON_PATH}" "${CONTENTS_PATH}/Resources/AIShortcutsLogo.icns"
 chmod 755 "${MACOS_PATH}/${EXECUTABLE_NAME}"
 
 INFO_PLIST="${CONTENTS_PATH}/Info.plist"
@@ -107,6 +114,7 @@ plutil -create xml1 "${INFO_PLIST}"
 plutil -insert CFBundleDevelopmentRegion -string "en" "${INFO_PLIST}"
 plutil -insert CFBundleDisplayName -string "${APP_NAME}" "${INFO_PLIST}"
 plutil -insert CFBundleExecutable -string "${EXECUTABLE_NAME}" "${INFO_PLIST}"
+plutil -insert CFBundleIconFile -string "AIShortcutsLogo.icns" "${INFO_PLIST}"
 plutil -insert CFBundleIdentifier -string "${BUNDLE_ID}" "${INFO_PLIST}"
 plutil -insert CFBundleInfoDictionaryVersion -string "6.0" "${INFO_PLIST}"
 plutil -insert CFBundleName -string "${APP_NAME}" "${INFO_PLIST}"
@@ -144,15 +152,23 @@ tccutil reset ScreenCapture "${BUNDLE_ID}"
 tccutil reset AppleEvents "${BUNDLE_ID}"
 defaults write "${BUNDLE_ID}" permissionsRequested.v1 -bool false
 
-# Rebuilding changes the ad-hoc signature, so an existing generic-password
-# item can retain an ACL for the previous executable. Remove only this app's
-# item; the newly launched app imports the optional bootstrap key or asks for
-# one, then creates a fresh ACL for its current signature.
-/usr/bin/security delete-generic-password \
-  -s "${KEYCHAIN_SERVICE}" \
-  -a "${KEYCHAIN_ACCOUNT}" >/dev/null 2>&1 || true
+# Preserve existing Keychain keys during updates so users don't have to re-enter them.
+# Pass --reset-key to explicitly clear stored keys.
+HAS_KEYCHAIN_KEY=false
+if /usr/bin/security find-generic-password -s "${KEYCHAIN_SERVICE}" -a "${KEYCHAIN_ACCOUNT}" >/dev/null 2>&1; then
+  HAS_KEYCHAIN_KEY=true
+fi
+if [[ "${1:-}" == "--reset-key" ]]; then
+  /usr/bin/security delete-generic-password \
+    -s "${KEYCHAIN_SERVICE}" \
+    -a "${KEYCHAIN_ACCOUNT}" >/dev/null 2>&1 || true
+  /usr/bin/security delete-generic-password \
+    -s "${ANTHROPIC_KEYCHAIN_SERVICE}" \
+    -a "${KEYCHAIN_ACCOUNT}" >/dev/null 2>&1 || true
+  HAS_KEYCHAIN_KEY=false
+fi
 
-if [[ -n "${API_KEY}" ]]; then
+if [[ "${HAS_KEYCHAIN_KEY}" == false && -n "${API_KEY}" ]]; then
   /bin/mkdir -p "${SUPPORT_PATH}"
   /bin/chmod 700 "${SUPPORT_PATH}"
   umask 077
@@ -168,4 +184,4 @@ launchctl kickstart -k "${AGENT_TARGET}"
 
 echo "Installed ${APP_PATH}"
 echo "AI Shortcuts is running and will launch automatically at login."
-echo "If no key was supplied, the app will ask for your OpenAI API key on first launch."
+echo "If no key was supplied, the app will ask for your API key on first launch."
