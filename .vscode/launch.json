@@ -39,6 +39,26 @@
             "target": "AIShortcutsCoreChecks",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release AIShortcutsCoreChecks"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:custom_shortcuts}",
+            "name": "Debug AIShortcutsRenderingChecks",
+            "target": "AIShortcutsRenderingChecks",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AIShortcutsRenderingChecks"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:custom_shortcuts}",
+            "name": "Release AIShortcutsRenderingChecks",
+            "target": "AIShortcutsRenderingChecks",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AIShortcutsRenderingChecks"
         }
     ]
 }

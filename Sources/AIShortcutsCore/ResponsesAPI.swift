@@ -149,21 +149,21 @@ public enum ResponsesAPIError: LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case .invalidRequest:
-            "The OpenAI request could not be encoded."
+            "The AI provider request could not be encoded."
         case .invalidHTTPResponse:
-            "OpenAI returned an invalid network response."
+            "The AI provider returned an invalid network response."
         case let .httpStatus(status, message):
-            message.isEmpty ? "OpenAI returned HTTP \(status)." : message
+            message.isEmpty ? "The AI provider returned HTTP \(status)." : message
         case let .incomplete(reason):
-            reason.isEmpty ? "OpenAI did not complete the response." : "OpenAI did not complete the response: \(reason)"
+            reason.isEmpty ? "The AI provider did not complete the response." : "The AI provider did not complete the response: \(reason)"
         case let .refusal(message):
-            message.isEmpty ? "OpenAI declined this request." : message
+            message.isEmpty ? "The AI provider declined this request." : message
         case .missingOutput:
-            "OpenAI returned no text."
+            "The AI provider returned no text."
         case let .invalidOutput(message):
-            message.isEmpty ? "OpenAI returned an invalid answer." : message
+            message.isEmpty ? "The AI provider returned an invalid answer." : message
         case .malformedResponse:
-            "OpenAI returned an unreadable response."
+            "The AI provider returned an unreadable response."
         }
     }
 }
@@ -331,7 +331,7 @@ public struct ResponsesAPIClient: Sendable {
         )
     }
 
-    private static func textFormat(
+    static func textFormat(
         for schema: OutputSchema,
         allowedOutputFormats: [AIOutputFormat]
     ) -> [String: Any] {
@@ -378,10 +378,31 @@ public struct ResponsesAPIClient: Sendable {
                     "additionalProperties": false,
                 ],
             ]
+        case .explanationResponse:
+            return [
+                "type": "json_schema",
+                "name": "explanation_response",
+                "strict": true,
+                "schema": [
+                    "type": "object",
+                    "properties": [
+                        "format": [
+                            "type": "string",
+                            "enum": formatValues,
+                        ],
+                        "explanation": [
+                            "type": "string",
+                            "description": "Clear explanation of the concept or text using markdown formatting where helpful.",
+                        ],
+                    ],
+                    "required": ["format", "explanation"],
+                    "additionalProperties": false,
+                ],
+            ]
         }
     }
 
-    private static func parseOutputDocument(
+    static func parseOutputDocument(
         from text: String,
         schema: OutputSchema?,
         allowedOutputFormats: [AIOutputFormat]
@@ -395,28 +416,35 @@ public struct ResponsesAPIClient: Sendable {
             throw ResponsesAPIError.invalidOutput("No output formats were allowed for this action.")
         }
 
-        let data = Data(text.utf8)
+        let dataToDecode = AIOutputDocumentSanitizer.extractJSONPayload(from: text) ?? Data(text.utf8)
         do {
             switch schema {
             case .textDocument:
-                let envelope = try JSONDecoder().decode(TextDocumentEnvelope.self, from: data)
+                let envelope = try JSONDecoder().decode(TextDocumentEnvelope.self, from: dataToDecode)
                 return try validatedDocument(
                     format: envelope.format,
                     source: envelope.content,
                     allowedOutputFormats: allowedOutputFormats
                 )
             case .calculateAnswer:
-                let envelope = try JSONDecoder().decode(CalculateDocumentEnvelope.self, from: data)
+                let envelope = try JSONDecoder().decode(CalculateDocumentEnvelope.self, from: dataToDecode)
                 return try validatedDocument(
                     format: envelope.format,
                     source: envelope.answer,
+                    allowedOutputFormats: allowedOutputFormats
+                )
+            case .explanationResponse:
+                let envelope = try JSONDecoder().decode(ExplanationDocumentEnvelope.self, from: dataToDecode)
+                return try validatedDocument(
+                    format: envelope.format,
+                    source: envelope.explanation,
                     allowedOutputFormats: allowedOutputFormats
                 )
             }
         } catch let error as ResponsesAPIError {
             throw error
         } catch {
-            throw ResponsesAPIError.invalidOutput("OpenAI returned an invalid structured answer.")
+            throw ResponsesAPIError.invalidOutput("The AI provider returned an invalid structured answer.")
         }
     }
 
@@ -425,16 +453,17 @@ public struct ResponsesAPIClient: Sendable {
         source: String,
         allowedOutputFormats: [AIOutputFormat]
     ) throws -> AIOutputDocument {
-        guard allowedOutputFormats.contains(format) else {
-            throw ResponsesAPIError.invalidOutput("OpenAI returned a disallowed output format.")
+        let initialDoc = AIOutputDocument(format: format, source: source)
+        let resolvedDoc = AIOutputDocumentSanitizer.unwrapOrSanitize(initialDoc)
+        guard allowedOutputFormats.contains(resolvedDoc.format) else {
+            throw ResponsesAPIError.invalidOutput("The AI provider returned a disallowed output format.")
         }
-        let document = AIOutputDocument(format: format, source: source)
         do {
-            try AIOutputDocumentValidator.validate(document)
+            try AIOutputDocumentValidator.validate(resolvedDoc)
         } catch let error as AIOutputValidationError {
             throw ResponsesAPIError.invalidOutput(error.localizedDescription)
         }
-        return document
+        return resolvedDoc
     }
 
     private static func parseAPIErrorMessage(from data: Data) -> String {
@@ -501,11 +530,11 @@ private struct CalculateDocumentEnvelope: Decodable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: StrictObjectCodingKey.self)
         let keys = Set(container.allKeys.map(\.stringValue))
-        guard keys == ["format", "answer"] else {
+        guard keys == ["format", "answer"] || keys == ["format", "content"] else {
             throw DecodingError.dataCorrupted(
                 .init(
                     codingPath: decoder.codingPath,
-                    debugDescription: "The calculate envelope must contain exactly format and answer."
+                    debugDescription: "The calculate envelope must contain format and answer (or content)."
                 )
             )
         }
@@ -513,10 +542,50 @@ private struct CalculateDocumentEnvelope: Decodable {
             AIOutputFormat.self,
             forKey: StrictObjectCodingKey(stringValue: "format")!
         )
-        self.answer = try container.decode(
-            String.self,
-            forKey: StrictObjectCodingKey(stringValue: "answer")!
+        if keys.contains("answer") {
+            self.answer = try container.decode(
+                String.self,
+                forKey: StrictObjectCodingKey(stringValue: "answer")!
+            )
+        } else {
+            self.answer = try container.decode(
+                String.self,
+                forKey: StrictObjectCodingKey(stringValue: "content")!
+            )
+        }
+    }
+}
+
+private struct ExplanationDocumentEnvelope: Decodable {
+    let format: AIOutputFormat
+    let explanation: String
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: StrictObjectCodingKey.self)
+        let keys = Set(container.allKeys.map(\.stringValue))
+        guard keys == ["format", "explanation"] || keys == ["format", "content"] else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "The explanation envelope must contain format and explanation (or content)."
+                )
+            )
+        }
+        self.format = try container.decode(
+            AIOutputFormat.self,
+            forKey: StrictObjectCodingKey(stringValue: "format")!
         )
+        if keys.contains("explanation") {
+            self.explanation = try container.decode(
+                String.self,
+                forKey: StrictObjectCodingKey(stringValue: "explanation")!
+            )
+        } else {
+            self.explanation = try container.decode(
+                String.self,
+                forKey: StrictObjectCodingKey(stringValue: "content")!
+            )
+        }
     }
 }
 

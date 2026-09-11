@@ -22,6 +22,9 @@ rmdir "${HOME}/Library/Application Support/AI Shortcuts" >/dev/null 2>&1 || true
 security delete-generic-password \
   -s "com.susanawang.aishortcuts.openai" \
   -a "default" >/dev/null 2>&1 || true
+security delete-generic-password \
+  -s "com.susanawang.aishortcuts.anthropic" \
+  -a "default" >/dev/null 2>&1 || true
 defaults delete "com.susanawang.aishortcuts" >/dev/null 2>&1 || true
 
 echo "Removed AI Shortcuts, its LaunchAgent, preferences, and imported Keychain item."

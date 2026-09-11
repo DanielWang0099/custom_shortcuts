@@ -27,8 +27,14 @@ final class ClipboardQueueService: @unchecked Sendable {
     private var copyBaselineChangeCount: Int?
     private var copyPressTracker = ClipboardQueueCopyPressTracker()
     private var captureGeneration = 0
+    private var pasteAdvanceGeneration = 0
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var globalEventMonitor: Any?
+    private var workspaceObserver: NSObjectProtocol?
+    private var pasteSession: ClipboardQueuePasteSession<ClipboardPayload>?
+    private var lastCopyTimestamp: TimeInterval = 0
+    private var lastPasteTimestamp: TimeInterval = 0
 
     init(eventHandler: @escaping @Sendable (ClipboardQueueEvent) -> Void) {
         self.eventHandler = eventHandler
@@ -39,7 +45,16 @@ final class ClipboardQueueService: @unchecked Sendable {
     }
 
     var count: Int {
-        stateLock.withLock { queue.count }
+        stateLock.withLock {
+            switch activeMode {
+            case .inactive:
+                return 0
+            case .collecting:
+                return queue.count
+            case .pasting:
+                return pasteSession?.count ?? 0
+            }
+        }
     }
 
     func startCollecting() -> Bool {
@@ -47,16 +62,15 @@ final class ClipboardQueueService: @unchecked Sendable {
 
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
             | CGEventMask(1 << CGEventType.keyUp.rawValue)
-        guard let tap = CGEvent.tapCreate(
+        let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: mask,
             callback: Self.eventCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ), let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
-            return false
-        }
+        )
+        let source = tap.flatMap { CFMachPortCreateRunLoopSource(kCFAllocatorDefault, $0, 0) }
 
         stateLock.withLock {
             activeMode = .collecting
@@ -65,48 +79,97 @@ final class ClipboardQueueService: @unchecked Sendable {
             copyBaselineChangeCount = nil
             copyPressTracker.reset()
             captureGeneration += 1
+            pasteAdvanceGeneration += 1
+            pasteSession = nil
+            lastCopyTimestamp = 0
+            lastPasteTimestamp = 0
             eventTap = tap
             runLoopSource = source
         }
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+
+        if let tap, let source {
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+            CGEvent.tapEnable(tap: tap, enable: true)
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.mode == .collecting else { return }
+            self.installGlobalMonitorIfNeeded()
+            self.installWorkspaceObserverIfNeeded()
+        }
+
         eventHandler(.changed(mode: .collecting, count: 0))
         return true
     }
 
     func beginPasting() {
-        let itemCount = stateLock.withLock { () -> Int in
-            guard activeMode == .collecting else {
-                return queue.count
+        let (firstPayload, totalCount) = stateLock.withLock { () -> (ClipboardPayload?, Int) in
+            guard activeMode == .collecting, !queue.isEmpty else {
+                return (nil, 0)
             }
-            activeMode = queue.isEmpty ? .inactive : .pasting
-            return queue.count
+            activeMode = .pasting
+            let session = ClipboardQueuePasteSession(queue: &queue)
+            let first = session.current
+            pasteSession = session
+            lastPasteTimestamp = ProcessInfo.processInfo.systemUptime
+            pasteAdvanceGeneration += 1
+            return (first, session.count)
         }
-        if itemCount == 0 {
-            deactivate(notify: true)
+        if let firstPayload {
+            firstPayload.write(to: .general)
+            eventHandler(.changed(mode: .pasting, count: totalCount))
         } else {
-            eventHandler(.changed(mode: .pasting, count: itemCount))
+            deactivate(notify: true)
         }
     }
 
     func deactivate(notify: Bool = true) {
-        let resources = stateLock.withLock { () -> (CFMachPort?, CFRunLoopSource?) in
+        let (resources, monitor, observer) = stateLock.withLock { () -> ((CFMachPort?, CFRunLoopSource?), Any?, NSObjectProtocol?) in
             activeMode = .inactive
             queue.reset()
             queuedBytes = 0
             copyBaselineChangeCount = nil
             copyPressTracker.reset()
             captureGeneration += 1
-            let resources = (eventTap, runLoopSource)
+            pasteAdvanceGeneration += 1
+            pasteSession = nil
+            lastCopyTimestamp = 0
+            lastPasteTimestamp = 0
+            let res = (eventTap, runLoopSource)
+            let mon = globalEventMonitor
+            let obs = workspaceObserver
             eventTap = nil
             runLoopSource = nil
-            return resources
+            globalEventMonitor = nil
+            workspaceObserver = nil
+            return (res, mon, obs)
         }
+
         if let source = resources.1 {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
         }
         if let tap = resources.0 {
             CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let monitor {
+            if Thread.isMainThread {
+                NSEvent.removeMonitor(monitor)
+            } else {
+                let box = UncheckedSendableBox(monitor)
+                DispatchQueue.main.async {
+                    NSEvent.removeMonitor(box.value)
+                }
+            }
+        }
+        if let observer {
+            if Thread.isMainThread {
+                NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            } else {
+                let box = UncheckedSendableBox(observer)
+                DispatchQueue.main.async {
+                    NSWorkspace.shared.notificationCenter.removeObserver(box.value)
+                }
+            }
         }
         if notify {
             eventHandler(.changed(mode: .inactive, count: 0))
@@ -115,6 +178,64 @@ final class ClipboardQueueService: @unchecked Sendable {
 
     deinit {
         deactivate(notify: false)
+    }
+
+    private func installGlobalMonitorIfNeeded() {
+        guard globalEventMonitor == nil else { return }
+        globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            self?.handleGlobalNSEvent(event)
+        }
+    }
+
+    private func installWorkspaceObserverIfNeeded() {
+        guard workspaceObserver == nil else { return }
+        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleApplicationSwitch()
+        }
+    }
+
+    private func handleApplicationSwitch() {
+        let (currentMode, tap, payload) = stateLock.withLock { () -> (ClipboardQueueMode, CFMachPort?, ClipboardPayload?) in
+            copyPressTracker.reset()
+            return (activeMode, eventTap, pasteSession?.current)
+        }
+        guard currentMode != .inactive else { return }
+        if let tap, !CGEvent.tapIsEnabled(tap: tap) {
+            CGEvent.tapEnable(tap: tap, enable: true)
+        }
+        if currentMode == .pasting, let payload {
+            payload.write(to: .general)
+        }
+    }
+
+    private func handleGlobalNSEvent(_ event: NSEvent) {
+        let currentMode = mode
+        guard currentMode != .inactive else { return }
+
+        let flags = event.modifierFlags.intersection([.command, .option, .control])
+        let isCmdOnly = flags == .command
+        let isC = event.keyCode == 8 || event.charactersIgnoringModifiers?.lowercased() == "c"
+        let isV = event.keyCode == 9 || event.charactersIgnoringModifiers?.lowercased() == "v"
+
+        if event.type == .keyDown {
+            if currentMode == .collecting && isCmdOnly && isC {
+                handleCopyKeyDown()
+            } else if currentMode == .pasting && isCmdOnly && isV {
+                handlePasteKeyDown()
+            } else if currentMode == .collecting && isCmdOnly && isV {
+                handlePasteKeyDownWhileCollecting()
+            }
+        } else if event.type == .keyUp {
+            if isC {
+                handleCopyKeyUp()
+            } else if isV {
+                handlePasteKeyUp()
+            }
+        }
     }
 
     private func process(type: CGEventType, event: CGEvent) {
@@ -134,42 +255,137 @@ final class ClipboardQueueService: @unchecked Sendable {
 
         let flagsOfInterest: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl]
         let flags = event.flags.intersection(flagsOfInterest)
+        let isCmdOnly = flags == .maskCommand
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        let isC = keyCode == 8
+        let isV = keyCode == 9
         let currentMode = stateLock.withLock { activeMode }
 
-        if currentMode == .collecting, keyCode == 8, flags == .maskCommand {
-            if type == .keyDown {
-                stateLock.withLock {
-                    guard activeMode == .collecting,
-                          copyPressTracker.beginKeyDown()
-                    else {
-                        return
-                    }
-                    copyBaselineChangeCount = NSPasteboard.general.changeCount
-                }
-            } else if type == .keyUp {
-                let baseline = stateLock.withLock { () -> Int? in
-                    guard copyPressTracker.endKeyUp() else {
-                        return nil
-                    }
-                    defer { copyBaselineChangeCount = nil }
-                    return copyBaselineChangeCount ?? NSPasteboard.general.changeCount
-                }
-                guard let baseline else {
-                    return
-                }
-                let generation = stateLock.withLock { captureGeneration }
-                captureWhenChanged(from: baseline, attempt: 0, generation: generation)
+        if type == .keyDown {
+            if currentMode == .collecting && isCmdOnly && isC {
+                handleCopyKeyDown()
+            } else if currentMode == .pasting && isCmdOnly && isV {
+                handlePasteKeyDown()
+            } else if currentMode == .collecting && isCmdOnly && isV {
+                handlePasteKeyDownWhileCollecting()
             }
-            return
+        } else if type == .keyUp {
+            if isC {
+                handleCopyKeyUp()
+            } else if isV {
+                handlePasteKeyUp()
+            }
         }
+    }
 
-        if currentMode == .pasting,
-           type == .keyDown,
-           keyCode == 9,
-           flags == .maskCommand
-        {
-            prepareNextPaste()
+    private func handleCopyKeyDown() {
+        let (shouldCapture, baseline, generation) = stateLock.withLock { () -> (Bool, Int, Int) in
+            guard activeMode == .collecting else {
+                return (false, 0, 0)
+            }
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastCopyTimestamp < 0.12 {
+                return (false, 0, 0)
+            }
+            guard copyPressTracker.beginKeyDown() || (now - lastCopyTimestamp > 0.8) else {
+                return (false, 0, 0)
+            }
+            lastCopyTimestamp = now
+            let baseline = NSPasteboard.general.changeCount
+            copyBaselineChangeCount = baseline
+            return (true, baseline, captureGeneration)
+        }
+        if shouldCapture {
+            captureWhenChanged(from: baseline, attempt: 0, generation: generation)
+        }
+    }
+
+    private func handleCopyKeyUp() {
+        stateLock.withLock {
+            _ = copyPressTracker.endKeyUp()
+            copyBaselineChangeCount = nil
+        }
+    }
+
+    private func handlePasteKeyDown() {
+        let (shouldProceed, generation) = stateLock.withLock { () -> (Bool, Int) in
+            guard activeMode == .pasting, let session = pasteSession, !session.isComplete else {
+                return (false, 0)
+            }
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastPasteTimestamp < 0.10 {
+                return (false, 0)
+            }
+            lastPasteTimestamp = now
+            pasteAdvanceGeneration += 1
+            return (true, pasteAdvanceGeneration)
+        }
+        guard shouldProceed else { return }
+
+        // The target application receives ⌘V and pastes the current payload from NSPasteboard.general.
+        // We schedule the queue advancement after a 40ms window to give the destination
+        // application time to synchronously read the pasteboard without interruption.
+        scheduleAdvanceAfterPaste(generation: generation)
+    }
+
+    private func handlePasteKeyUp() {
+        let generation = stateLock.withLock { activeMode == .pasting ? pasteAdvanceGeneration : 0 }
+        if generation > 0 {
+            advancePasteQueue(generation: generation)
+        }
+    }
+
+    private func handlePasteKeyDownWhileCollecting() {
+        let (firstPayload, totalCount, generation) = stateLock.withLock { () -> (ClipboardPayload?, Int, Int) in
+            guard activeMode == .collecting, !queue.isEmpty else { return (nil, 0, 0) }
+            activeMode = .pasting
+            let session = ClipboardQueuePasteSession(queue: &queue)
+            let first = session.current
+            pasteSession = session
+            let now = ProcessInfo.processInfo.systemUptime
+            lastPasteTimestamp = now
+            pasteAdvanceGeneration += 1
+            return (first, session.count, pasteAdvanceGeneration)
+        }
+        guard let firstPayload else { return }
+        firstPayload.write(to: .general)
+        eventHandler(.changed(mode: .pasting, count: totalCount))
+        scheduleAdvanceAfterPaste(generation: generation)
+    }
+
+    private func scheduleAdvanceAfterPaste(generation: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.040) { [weak self] in
+            self?.advancePasteQueue(generation: generation)
+        }
+    }
+
+    private func advancePasteQueue(generation: Int) {
+        let action = stateLock.withLock { () -> (nextPayload: ClipboardPayload?, remaining: Int, shouldDeactivate: Bool)? in
+            guard activeMode == .pasting,
+                  pasteAdvanceGeneration == generation,
+                  var session = pasteSession
+            else {
+                return nil
+            }
+            pasteAdvanceGeneration += 1
+
+            if let next = session.advance() {
+                pasteSession = session
+                return (next, session.count, false)
+            } else {
+                pasteSession = nil
+                return (nil, 0, true)
+            }
+        }
+        guard let action else { return }
+
+        if let nextPayload = action.nextPayload {
+            nextPayload.write(to: .general)
+            eventHandler(.changed(mode: .pasting, count: action.remaining))
+        } else if action.shouldDeactivate {
+            DispatchQueue.main.async { [weak self] in
+                self?.deactivate(notify: true)
+            }
         }
     }
 
@@ -186,7 +402,7 @@ final class ClipboardQueueService: @unchecked Sendable {
             let pasteboard = NSPasteboard.general
             guard pasteboard.changeCount != baseline else {
                 if attempt + 1 < ClipboardQueueCapturePolicy.maximumCaptureAttempts {
-                    captureWhenChanged(
+                    self.captureWhenChanged(
                         from: baseline,
                         attempt: attempt + 1,
                         generation: generation
@@ -198,47 +414,22 @@ final class ClipboardQueueService: @unchecked Sendable {
                 return
             }
 
-            let accepted = stateLock.withLock { () -> Bool in
-                guard activeMode == .collecting,
-                      queue.count < Self.maximumItems,
-                      queuedBytes + payload.byteCount <= Self.maximumBytes
+            let accepted = self.stateLock.withLock { () -> Bool in
+                guard self.activeMode == .collecting,
+                      self.queue.count < Self.maximumItems,
+                      self.queuedBytes + payload.byteCount <= Self.maximumBytes
                 else {
                     return false
                 }
-                queue.enqueue(payload)
-                queuedBytes += payload.byteCount
+                self.queue.enqueue(payload)
+                self.queuedBytes += payload.byteCount
                 return true
             }
             if accepted {
-                eventHandler(.changed(mode: .collecting, count: count))
+                self.eventHandler(.changed(mode: .collecting, count: self.count))
             } else {
-                eventHandler(.captureRejected)
+                self.eventHandler(.captureRejected)
             }
-        }
-    }
-
-    private func prepareNextPaste() {
-        let result = stateLock.withLock { () -> (ClipboardPayload?, Int) in
-            guard activeMode == .pasting, !queue.isEmpty else {
-                return (nil, queue.count)
-            }
-            guard let payload = queue.dequeue() else {
-                return (nil, 0)
-            }
-            queuedBytes = max(0, queuedBytes - payload.byteCount)
-            return (payload, queue.count)
-        }
-        guard let payload = result.0 else {
-            return
-        }
-        payload.write(to: .general)
-
-        if result.1 == 0 {
-            DispatchQueue.main.async { [weak self] in
-                self?.deactivate(notify: true)
-            }
-        } else {
-            eventHandler(.changed(mode: .pasting, count: result.1))
         }
     }
 
@@ -260,7 +451,7 @@ private struct ClipboardPayload: @unchecked Sendable {
     let byteCount: Int
 
     init?(pasteboard: NSPasteboard) {
-        let captured = (pasteboard.pasteboardItems ?? []).compactMap { item -> [NSPasteboard.PasteboardType: Data]? in
+        var captured = (pasteboard.pasteboardItems ?? []).compactMap { item -> [NSPasteboard.PasteboardType: Data]? in
             let values = item.types.reduce(into: [NSPasteboard.PasteboardType: Data]()) {
                 result, type in
                 if let data = item.data(forType: type) {
@@ -268,6 +459,12 @@ private struct ClipboardPayload: @unchecked Sendable {
                 }
             }
             return values.isEmpty ? nil : values
+        }
+        if captured.isEmpty {
+            if let string = pasteboard.string(forType: .string),
+               let data = string.data(using: .utf8) {
+                captured = [[.string: data]]
+            }
         }
         guard !captured.isEmpty else {
             return nil
@@ -287,6 +484,17 @@ private struct ClipboardPayload: @unchecked Sendable {
             return item
         }
         pasteboard.clearContents()
-        pasteboard.writeObjects(pasteboardItems)
+        if !pasteboardItems.isEmpty {
+            pasteboard.writeObjects(pasteboardItems)
+        } else if let first = items.first, let strData = first[.string], let str = String(data: strData, encoding: .utf8) {
+            pasteboard.setString(str, forType: .string)
+        }
+    }
+}
+
+private final class UncheckedSendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) {
+        self.value = value
     }
 }

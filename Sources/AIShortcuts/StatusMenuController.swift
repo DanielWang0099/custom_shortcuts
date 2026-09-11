@@ -9,10 +9,10 @@ struct StatusMenuSnapshot {
     let accessibilityGranted: Bool
     let screenRecordingGranted: Bool
     let finderAutomationAuthorization: FinderAutomationAuthorization
-    let fullBudgetRemaining: Int
     let lastAPIStatus: String
     let currentAction: String?
     let enabledShortcutActions: Set<AIShortcutAction>
+    let providerSummary: String
 }
 
 @MainActor
@@ -21,8 +21,8 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     private let menu = NSMenu()
     private let snapshot: () -> StatusMenuSnapshot
 
-    var onEnable: (() -> Void)?
-    var onOpenDataSettings: (() -> Void)?
+    var onOpenWelcome: (() -> Void)?
+    var onOpenModelSettings: (() -> Void)?
     var onReloadKey: (() -> Void)?
     var onOpenAccessibilitySettings: (() -> Void)?
     var onOpenScreenRecordingSettings: (() -> Void)?
@@ -43,9 +43,16 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 
     func setBusy(_ busy: Bool) {
-        let symbol = busy ? "ellipsis.circle" : "sparkles"
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "AI Shortcuts")
-        image?.isTemplate = true
+        let image: NSImage
+        if busy {
+            image = NSImage(
+                systemSymbolName: "ellipsis.circle",
+                accessibilityDescription: "AI Shortcuts"
+            ) ?? AIShortcutsLogo.menuBarImage()
+        } else {
+            image = AIShortcutsLogo.menuBarImage()
+        }
+        image.isTemplate = true
         statusItem.button?.image = image
         rebuildMenu()
     }
@@ -79,6 +86,17 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
                 enabled: state.enabledShortcutActions.contains(definition.action)
             ))
         }
+        let welcome = actionItem(
+            "Welcome & Setup…",
+            action: #selector(openWelcome)
+        )
+        welcome.image = NSImage(
+            systemSymbolName: "hand.wave",
+            accessibilityDescription: "Welcome & Setup"
+        )
+        welcome.indentationLevel = 1
+        menu.addItem(welcome)
+
         let guide = actionItem(
             "Shortcut Guide…",
             action: #selector(openShortcutGuide)
@@ -92,32 +110,20 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(disabledItem("Readiness"))
-        if !state.enabled {
-            let enable = actionItem("Enable AI Shortcuts…", action: #selector(enable))
-            enable.indentationLevel = 1
-            menu.addItem(enable)
-        } else {
-            let dataSharing = disabledItem("Data sharing · Confirmed")
-            dataSharing.indentationLevel = 1
-            menu.addItem(dataSharing)
-        }
 
-        let dataSettings = actionItem(
-            "Open OpenAI Data Settings",
-            action: #selector(openDataSettings)
+        let modelSettings = actionItem(
+            "Model Settings…",
+            action: #selector(openModelSettings)
         )
-        dataSettings.indentationLevel = 1
-        menu.addItem(dataSettings)
+        modelSettings.indentationLevel = 1
+        menu.addItem(modelSettings)
+        let modelItem = disabledItem("Model · \(state.providerSummary)")
+        modelItem.indentationLevel = 1
+        menu.addItem(modelItem)
 
-        let key = disabledItem("OpenAI key · \(state.keyReady ? "Ready" : "Missing")")
+        let key = disabledItem("API key · \(state.keyReady ? "Ready" : "Missing")")
         key.indentationLevel = 1
         menu.addItem(key)
-
-        let budget = disabledItem(
-            "Daily budget guard · \(state.fullBudgetRemaining.formatted()) remaining"
-        )
-        budget.indentationLevel = 1
-        menu.addItem(budget)
 
         let apiStatus = disabledItem("Last request · \(state.lastAPIStatus)")
         apiStatus.indentationLevel = 1
@@ -202,12 +208,12 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         return item
     }
 
-    @objc private func enable() {
-        onEnable?()
+    @objc private func openWelcome() {
+        onOpenWelcome?()
     }
 
-    @objc private func openDataSettings() {
-        onOpenDataSettings?()
+    @objc private func openModelSettings() {
+        onOpenModelSettings?()
     }
 
     @objc private func reloadKey() {

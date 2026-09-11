@@ -7,9 +7,9 @@ public enum KeySourceError: LocalizedError, Equatable {
     public var errorDescription: String? {
         switch self {
         case .missingKey:
-            "No OpenAI API key was configured."
+            "No API key was configured."
         case .unreadableFile:
-            "The selected OpenAI API key file could not be read."
+            "The selected API key file could not be read."
         }
     }
 }

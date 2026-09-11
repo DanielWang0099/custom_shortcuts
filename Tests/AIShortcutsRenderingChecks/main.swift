@@ -150,6 +150,33 @@ struct RenderingChecks {
                 && !legacyEnvelope.contains("content"),
             "A structured plain-text envelope was displayed instead of its content."
         )
+
+        let glitchEnvelope = renderer.render(
+            AIOutputDocument(
+                format: .plainText,
+                source: ##"{"format":"plain_text","content":"I'm not sure what you mean by \"ehaiefa\".\nPlease rephrase or give a bit more context."}'}## assistant to=final 天天中彩票是 ḩչល 天天中彩票投注 code 娱乐总代理ai_text_document 彩神争霸下载{"##
+            )
+        )
+        try expect(
+            glitchEnvelope.contains("I&#39;m not sure what you mean by &quot;ehaiefa&quot;.")
+                && glitchEnvelope.contains("Please rephrase or give a bit more context.")
+                && !glitchEnvelope.contains("format")
+                && !glitchEnvelope.contains("assistant to=final")
+                && !glitchEnvelope.contains("天天中彩票"),
+            "A malformed structured envelope with trailing glitch tokens was displayed instead of clean text."
+        )
+
+        let fencedEnvelope = renderer.render(
+            AIOutputDocument(
+                format: .plainText,
+                source: "```json\n{\"format\":\"markdown\",\"content\":\"**Important note**\"}\n```"
+            )
+        )
+        try expect(
+            fencedEnvelope.contains("<strong>Important note</strong>")
+                && !fencedEnvelope.contains("```"),
+            "A fenced structured envelope was not unwrapped and formatted."
+        )
     }
 
     private static func mathAttachmentCheck() throws {

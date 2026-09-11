@@ -4,11 +4,15 @@ import Foundation
 @MainActor
 final class AppStateStore {
     private enum Key {
-        static let dataSharingAcknowledged = "dataSharingAcknowledged.v1"
+        static let welcomeDismissed = "welcomeDismissed.v1"
         static let permissionsRequested = "permissionsRequested.v1"
-        static let fullBudgetState = "dailyBudgetState.v1"
         static let safetyIdentifier = "safetyIdentifier.v1"
         static let disabledShortcutActions = "disabledShortcutActions.v1"
+        static let aiProvider = "aiProvider.v1"
+        static let openAIEndpoint = "openAIEndpoint.v1"
+        static let openAIModel = "openAIModel.v1"
+        static let anthropicEndpoint = "anthropicEndpoint.v1"
+        static let anthropicModel = "anthropicModel.v1"
     }
 
     private let defaults: UserDefaults
@@ -17,14 +21,48 @@ final class AppStateStore {
         self.defaults = defaults
     }
 
-    var dataSharingAcknowledged: Bool {
-        get { defaults.bool(forKey: Key.dataSharingAcknowledged) }
-        set { defaults.set(newValue, forKey: Key.dataSharingAcknowledged) }
+    var welcomeDismissed: Bool {
+        get { defaults.bool(forKey: Key.welcomeDismissed) }
+        set { defaults.set(newValue, forKey: Key.welcomeDismissed) }
     }
 
     var permissionsRequested: Bool {
         get { defaults.bool(forKey: Key.permissionsRequested) }
         set { defaults.set(newValue, forKey: Key.permissionsRequested) }
+    }
+
+    var aiProvider: AIProvider {
+        get {
+            AIProvider(rawValue: defaults.string(forKey: Key.aiProvider) ?? "")
+                ?? .openAICompatible
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Key.aiProvider)
+        }
+    }
+
+    func aiProviderConfiguration(for provider: AIProvider) -> AIProviderConfiguration {
+        let fallback = AIProviderConfiguration.defaultConfiguration(for: provider)
+        let endpointString = defaults.string(forKey: endpointKey(for: provider)) ?? ""
+        let model = defaults.string(forKey: modelKey(for: provider)) ?? ""
+        let configuration = AIProviderConfiguration(
+            provider: provider,
+            endpoint: URL(string: endpointString) ?? fallback.endpoint,
+            model: model.isEmpty ? fallback.model : model
+        )
+        return configuration.validationMessage == nil ? configuration : fallback
+    }
+
+    func saveAIProviderConfiguration(_ configuration: AIProviderConfiguration) {
+        defaults.set(configuration.provider.rawValue, forKey: Key.aiProvider)
+        defaults.set(
+            configuration.endpoint.absoluteString,
+            forKey: endpointKey(for: configuration.provider)
+        )
+        defaults.set(
+            configuration.model.trimmingCharacters(in: .whitespacesAndNewlines),
+            forKey: modelKey(for: configuration.provider)
+        )
     }
 
     var safetyIdentifier: String {
@@ -59,25 +97,21 @@ final class AppStateStore {
         })
     }
 
-    func loadFullBudgetState() -> DailyBudgetState? {
-        loadBudgetState(forKey: Key.fullBudgetState)
-    }
-
-    func saveFullBudgetState(_ state: DailyBudgetState) {
-        saveBudgetState(state, forKey: Key.fullBudgetState)
-    }
-
-    private func loadBudgetState(forKey key: String) -> DailyBudgetState? {
-        guard let data = defaults.data(forKey: key) else {
-            return nil
+    private func endpointKey(for provider: AIProvider) -> String {
+        switch provider {
+        case .openAICompatible:
+            Key.openAIEndpoint
+        case .anthropic:
+            Key.anthropicEndpoint
         }
-        return try? JSONDecoder().decode(DailyBudgetState.self, from: data)
     }
 
-    private func saveBudgetState(_ state: DailyBudgetState, forKey key: String) {
-        guard let data = try? JSONEncoder().encode(state) else {
-            return
+    private func modelKey(for provider: AIProvider) -> String {
+        switch provider {
+        case .openAICompatible:
+            Key.openAIModel
+        case .anthropic:
+            Key.anthropicModel
         }
-        defaults.set(data, forKey: key)
     }
 }

@@ -96,11 +96,12 @@ public final class NativeRichTextRenderer {
     }
 
     public func render(_ document: AIOutputDocument) -> RenderedRichText {
+        let displayDocument = AIOutputDocumentSanitizer.unwrapOrSanitize(document)
         let builder = RichTextBuilder(theme: theme)
-        builder.render(document)
+        builder.render(displayDocument)
         let attributedString = builder.attributedString
         let payload = Self.makeClipboardPayload(
-            source: document.source,
+            source: displayDocument.source,
             attributedString: attributedString
         )
         return RenderedRichText(

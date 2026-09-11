@@ -1,8 +1,10 @@
 import Foundation
+import AIShortcutsCore
 
 enum AppConfiguration {
     static let bundleIdentifier = "com.susanawang.aishortcuts"
     static let keychainService = "com.susanawang.aishortcuts.openai"
+    static let anthropicKeychainService = "com.susanawang.aishortcuts.anthropic"
     static let keychainAccount = "default"
     static let launchAgentLabel = "com.susanawang.aishortcuts"
 
@@ -18,9 +20,14 @@ enum AppConfiguration {
             .appendingPathComponent("bootstrap-key")
     }
 
-    static let dataSharingSettingsURL = URL(
-        string: "https://platform.openai.com/settings/organization/data-controls/sharing"
-    )!
+    static func keychainService(for provider: AIProvider) -> String {
+        switch provider {
+        case .openAICompatible:
+            keychainService
+        case .anthropic:
+            anthropicKeychainService
+        }
+    }
     static let accessibilitySettingsURL = URL(
         string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
     )!

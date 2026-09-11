@@ -184,25 +184,25 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
             return (
                 "Drag over any screen area to transcribe all visible text.",
                 "Result · Literal plain text is copied; the screenshot is not retained.",
-                "Screen Recording + OpenAI"
+                "Screen Recording + configured provider"
             )
         case .refine:
             return (
                 "Correct spelling, grammar, and awkward wording in selected text without changing its language.",
                 "Result · Preserves detected Markdown/equation mode; replaces an unchanged selection or copies the revision.",
-                "Accessibility + OpenAI"
+                "Accessibility + configured provider"
             )
         case .translate:
             return (
                 "Translate selected text using a free-form target such as “Japanese, formal”.",
                 "Result · Preserves detected Markdown/equation mode, copies the translation, and leaves the original selection untouched.",
-                "Accessibility + OpenAI"
+                "Accessibility + configured provider"
             )
         case .format:
             return (
                 "Restructure selected text using a short instruction such as “concise email with bullets”.",
                 "Result · Uses guarded Markdown for structured requests; safely replaces an unchanged selection or copies the result.",
-                "Accessibility + OpenAI"
+                "Accessibility + configured provider"
             )
         case .finderPath:
             return (
@@ -214,13 +214,13 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
             return (
                 "Ask about hidden selected text, type a general question, or paste up to four images.",
                 "Result · Assistant answers render guarded Markdown and common LaTeX in a selectable conversation; display equations are centered blocks and unsupported source stays visible.",
-                "Accessibility + OpenAI"
+                "Accessibility + configured provider"
             )
         case .calculate:
             return (
                 "Crop visual data and optionally describe the calculation or extraction you need.",
                 "Result · Shows a selectable, scrollable rich answer until the cursor moves away; centered display equations and unsupported source remain visible, and the answer copies with rich formats.",
-                "Screen Recording + OpenAI"
+                "Screen Recording + configured provider"
             )
         case .inputLock:
             return (
@@ -238,7 +238,7 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
             return (
                 "Insert a saved value by key. Use /new, /modify, or /delete in the same adaptive panel.",
                 "Result · Pastes into the original field and restores your clipboard; only ambiguous key labels use AI.",
-                "Accessibility; OpenAI only for smart matching"
+                "Accessibility; configured provider only for smart matching"
             )
         }
     }

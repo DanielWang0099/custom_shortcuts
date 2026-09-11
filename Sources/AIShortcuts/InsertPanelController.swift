@@ -17,14 +17,14 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
     typealias DeleteHandler = (UUID) throws -> [InsertEntry]
 
     private let panel: InsertPanel
-    private let root = NSView()
+    private let root = FlippedView()
     private let titleLabel = NSTextField(labelWithString: "Insert")
     private let contextLabel = NSTextField(labelWithString: "/new · /modify · /delete")
     private let backButton = NSButton(title: "", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
 
     private let lookupSurface = NSView()
-    private let libraryRevealButton = LibraryButton()
+    private let libraryRevealButton = ThinLibraryButton()
     private let lookupField = NSTextField()
     private let lookupButton = NSButton()
 
@@ -104,17 +104,19 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
 
     func showLookupError(_ message: String) {
         setResolving(false)
-        let previousFrame = lookupSurface.frame
         statusLabel.textColor = ShortcutUIStyle.warningAccentColor
         statusLabel.stringValue = message
         statusLabel.alphaValue = 0
-        resizePanel(to: 150, animated: true)
-        let targetFrame = lookupSurface.frame
-        lookupSurface.frame = previousFrame
+
+        var targetFrame = panel.frame
+        targetFrame.origin.y += targetFrame.height - 148
+        targetFrame.size.height = 148
+        layoutCurrentMode(height: 148)
+
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.24
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            lookupSurface.animator().frame = targetFrame
+            context.duration = 0.20
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().setFrame(targetFrame, display: true)
             statusLabel.animator().alphaValue = 1
         }
         panel.makeFirstResponder(lookupField)
@@ -225,6 +227,7 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
+        panel.animationBehavior = .none
         panel.appearance = NSAppearance(named: .darkAqua)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.isReleasedWhenClosed = false
@@ -319,7 +322,7 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
         )?.withSymbolConfiguration(
             NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
         )
-        arrowImageView.contentTintColor = ShortcutUIStyle.accentColor
+        arrowImageView.contentTintColor = ShortcutUIStyle.secondaryTextColor.withAlphaComponent(0.6)
         arrowImageView.imageScaling = .scaleProportionallyDown
         arrowImageView.setAccessibilityLabel("Maps key to value")
 
@@ -337,13 +340,20 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
     }
 
     private func configureManagement() {
+        searchField.cell = InsetSearchFieldCell(textCell: "")
         searchField.delegate = self
         searchField.focusRingType = .none
         searchField.isBordered = false
         searchField.drawsBackground = false
         searchField.font = .systemFont(ofSize: 13.5)
         searchField.textColor = ShortcutUIStyle.primaryTextColor
-        searchField.placeholderString = "Search keys or values"
+        searchField.placeholderAttributedString = NSAttributedString(
+            string: "Search keys or values",
+            attributes: [
+                .foregroundColor: ShortcutUIStyle.placeholderTextColor,
+                .font: NSFont.systemFont(ofSize: 13.5),
+            ]
+        )
         searchField.wantsLayer = true
         searchField.layer?.cornerRadius = 17
         searchField.layer?.backgroundColor = ShortcutUIStyle.raisedSurfaceColor.cgColor
@@ -367,19 +377,7 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
         self.mode = mode
         statusLabel.stringValue = ""
         let management = mode == .browse || mode == .modify || mode == .delete
-        let height: CGFloat = management ? 330 : (mode == .create ? 148 : 126)
-
-        if animated, panel.isVisible {
-            incoming.forEach {
-                $0.isHidden = false
-                $0.alphaValue = 0
-            }
-            titleLabel.alphaValue = 0.45
-            contextLabel.alphaValue = 0.35
-            backButton.isHidden = false
-            backButton.alphaValue = mode == .lookup ? 1 : 0
-        }
-        resizePanel(to: height, animated: animated)
+        let targetHeight: CGFloat = management ? 356 : (mode == .create ? 148 : 126)
 
         switch mode {
         case .lookup:
@@ -414,47 +412,109 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
             rebuildRows()
             panel.makeFirstResponder(searchField)
         }
-        layoutCurrentMode()
-        applyModeVisibility(
-            outgoing: outgoing,
-            incoming: incoming,
-            animated: animated
-        )
+
+        var targetFrame = panel.frame
+        targetFrame.origin.y += targetFrame.height - targetHeight
+        targetFrame.size.height = targetHeight
+
+        let targetTitleX: CGFloat = mode == .lookup ? 20 : 46
+        let targetTitleWidth: CGFloat = mode == .lookup ? 250 : 224
+        let targetTitleFrame = NSRect(x: targetTitleX, y: 16, width: targetTitleWidth, height: 20)
+
+        layoutCurrentMode(height: targetHeight)
+
+        if animated && panel.isVisible {
+            incoming.forEach {
+                $0.isHidden = false
+                $0.alphaValue = 0
+            }
+            backButton.isHidden = false
+
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.22
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                context.allowsImplicitAnimation = true
+
+                panel.animator().setFrame(targetFrame, display: true)
+                titleLabel.animator().frame = targetTitleFrame
+                backButton.animator().alphaValue = mode == .lookup ? 0 : 1
+
+                outgoing.filter { view in !incoming.contains { $0 === view } }.forEach {
+                    $0.animator().alphaValue = 0
+                }
+                incoming.forEach {
+                    $0.animator().alphaValue = 1
+                }
+            } completionHandler: { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    outgoing.filter { view in !incoming.contains { $0 === view } }.forEach {
+                        $0.isHidden = true
+                        $0.alphaValue = 1
+                    }
+                    self.backButton.isHidden = (self.mode == .lookup)
+                    self.backButton.alphaValue = (self.mode == .lookup) ? 0 : 1
+                    self.layoutCurrentMode()
+                }
+            }
+        } else {
+            panel.setFrame(targetFrame, display: true)
+            titleLabel.frame = targetTitleFrame
+            backButton.isHidden = mode == .lookup
+            backButton.alphaValue = mode == .lookup ? 0 : 1
+
+            let allViews = [
+                lookupSurface,
+                libraryRevealButton,
+                createSurface,
+                searchField,
+                scrollView,
+            ]
+            allViews.forEach { view in
+                view.isHidden = !incoming.contains { $0 === view }
+                view.alphaValue = 1
+            }
+            layoutCurrentMode()
+        }
     }
 
-    private func layoutCurrentMode() {
+    private func layoutCurrentMode(height overrideHeight: CGFloat? = nil) {
         let width = panel.frame.width
-        let height = panel.frame.height
-        titleLabel.frame = NSRect(x: 20, y: height - 39, width: 250, height: 20)
-        backButton.frame = NSRect(x: 10, y: height - 45, width: 30, height: 30)
-        if !backButton.isHidden {
-            titleLabel.frame.origin.x = 46
-            titleLabel.frame.size.width = 224
+        let height = overrideHeight ?? panel.frame.height
+
+        backButton.frame = NSRect(x: 10, y: 12, width: 30, height: 30)
+        let titleX: CGFloat = mode == .lookup ? 20 : 46
+        let titleWidth: CGFloat = mode == .lookup ? 250 : 224
+        titleLabel.frame = NSRect(x: titleX, y: 16, width: titleWidth, height: 20)
+        contextLabel.frame = NSRect(x: 270, y: 18, width: width - 286, height: 18)
+
+        switch mode {
+        case .lookup:
+            let isError = !statusLabel.stringValue.isEmpty
+            lookupSurface.frame = NSRect(x: 14, y: 46, width: width - 28, height: 60)
+            lookupField.frame = NSRect(x: 16, y: 0, width: width - 110, height: 60)
+            lookupButton.frame = NSRect(x: width - 68, y: 11, width: 38, height: 38)
+            libraryRevealButton.frame = NSRect(
+                x: width / 2 - 30,
+                y: isError ? 134 : 112,
+                width: 60,
+                height: 10
+            )
+            statusLabel.frame = NSRect(x: 20, y: 118, width: width - 40, height: 16)
+        case .create:
+            createSurface.frame = NSRect(x: 14, y: 46, width: width - 28, height: 66)
+            keySurface.frame = NSRect(x: 0, y: 11, width: 177, height: 44)
+            keyField.frame = NSRect(x: 14, y: 0, width: 149, height: 44)
+            arrowImageView.frame = NSRect(x: 182, y: 22, width: 24, height: 22)
+            valueSurface.frame = NSRect(x: 212, y: 11, width: 247, height: 44)
+            valueField.frame = NSRect(x: 14, y: 0, width: 219, height: 44)
+            saveButton.frame = NSRect(x: 470, y: 15, width: 74, height: 36)
+            statusLabel.frame = NSRect(x: 20, y: 122, width: width - 40, height: 16)
+        case .browse, .modify, .delete:
+            searchField.frame = NSRect(x: 16, y: 46, width: width - 32, height: 34)
+            scrollView.frame = NSRect(x: 16, y: 90, width: width - 32, height: max(60, height - 120))
+            statusLabel.frame = NSRect(x: 20, y: height - 24, width: width - 40, height: 16)
         }
-        contextLabel.frame = NSRect(x: 270, y: height - 38, width: width - 290, height: 18)
-        statusLabel.frame = NSRect(x: 20, y: 12, width: width - 40, height: 16)
-
-        let lookupY: CGFloat = statusLabel.stringValue.isEmpty ? 18 : 38
-        lookupSurface.frame = NSRect(x: 14, y: lookupY, width: width - 28, height: 62)
-        lookupField.frame = NSRect(x: 18, y: 0, width: width - 112, height: 62)
-        lookupButton.frame = NSRect(x: width - 72, y: 11, width: 40, height: 40)
-        libraryRevealButton.frame = NSRect(
-            x: width / 2 - 58,
-            y: 0,
-            width: 116,
-            height: 22
-        )
-
-        createSurface.frame = NSRect(x: 14, y: 30, width: width - 28, height: 66)
-        keySurface.frame = NSRect(x: 0, y: 11, width: 177, height: 44)
-        keyField.frame = NSRect(x: 14, y: 0, width: 149, height: 44)
-        arrowImageView.frame = NSRect(x: 182, y: 22, width: 24, height: 22)
-        valueSurface.frame = NSRect(x: 212, y: 11, width: 247, height: 44)
-        valueField.frame = NSRect(x: 14, y: 0, width: 219, height: 44)
-        saveButton.frame = NSRect(x: 470, y: 15, width: 74, height: 36)
-
-        searchField.frame = NSRect(x: 18, y: height - 88, width: width - 36, height: 34)
-        scrollView.frame = NSRect(x: 14, y: 18, width: width - 28, height: height - 116)
     }
 
     private func rebuildRows() {
@@ -463,8 +523,9 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
             by: searchField.stringValue,
             entries: entries
         )
-        let rowHeight: CGFloat = 54
-        let width = max(scrollView.contentSize.width, panel.frame.width - 46)
+        let rowHeight: CGFloat = 50
+        let itemHeight: CGFloat = 42
+        let width = max(scrollView.contentSize.width, panel.frame.width - 32)
         if visibleEntries.isEmpty {
             let empty = NSTextField(labelWithString: entries.isEmpty
                 ? "No saved insertions yet. Use /new to add one."
@@ -472,7 +533,7 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
             empty.font = .systemFont(ofSize: 13, weight: .medium)
             empty.textColor = ShortcutUIStyle.secondaryTextColor
             empty.alignment = .center
-            empty.frame = NSRect(x: 10, y: 42, width: width - 20, height: 20)
+            empty.frame = NSRect(x: 10, y: 46, width: width - 20, height: 20)
             rowsView.addSubview(empty)
             rowsView.frame = NSRect(x: 0, y: 0, width: width, height: 120)
             return
@@ -480,7 +541,7 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
 
         for (index, entry) in visibleEntries.enumerated() {
             let row = InsertEntryRowView(
-                frame: NSRect(x: 0, y: CGFloat(index) * rowHeight, width: width, height: 48),
+                frame: NSRect(x: 0, y: CGFloat(index) * rowHeight, width: width, height: itemHeight),
                 entry: entry,
                 isDeleting: mode == .delete,
                 isBrowsing: mode == .browse,
@@ -575,30 +636,7 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
         panel.setFrameOrigin(NSPoint(x: targetX, y: targetY))
     }
 
-    private func resizePanel(to height: CGFloat, animated: Bool) {
-        guard panel.frame.height != height else {
-            layoutCurrentMode()
-            return
-        }
-        var frame = panel.frame
-        frame.origin.y += frame.height - height
-        frame.size.height = height
-        if animated, panel.isVisible {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.18
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                panel.animator().setFrame(frame, display: true)
-            } completionHandler: { [weak self] in
-                Task { @MainActor in
-                    self?.layoutCurrentMode()
-                }
-            }
-        } else {
-            panel.setFrame(frame, display: true)
-        }
-        root.frame = NSRect(origin: .zero, size: frame.size)
-        layoutCurrentMode()
-    }
+
 
     private func configureTextField(
         _ field: NSTextField,
@@ -665,29 +703,21 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
         guard mode == .lookup, !statusLabel.stringValue.isEmpty else {
             return
         }
-        let previousFrame = lookupSurface.frame
+        var targetFrame = panel.frame
+        targetFrame.origin.y += targetFrame.height - 126
+        targetFrame.size.height = 126
+
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.12
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            context.duration = 0.18
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().setFrame(targetFrame, display: true)
             statusLabel.animator().alphaValue = 0
         } completionHandler: { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                guard self.mode == .lookup else {
-                    self.statusLabel.stringValue = ""
-                    self.statusLabel.alphaValue = 1
-                    return
-                }
+            MainActor.assumeIsolated {
+                guard let self, self.mode == .lookup else { return }
                 self.statusLabel.stringValue = ""
-                self.resizePanel(to: 126, animated: true)
-                let targetFrame = self.lookupSurface.frame
-                self.lookupSurface.frame = previousFrame
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.22
-                    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                    self.lookupSurface.animator().frame = targetFrame
-                }
                 self.statusLabel.alphaValue = 1
+                self.layoutCurrentMode(height: 126)
             }
         }
     }
@@ -716,64 +746,6 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
             [createSurface]
         case .modify, .delete:
             [searchField, scrollView]
-        }
-    }
-
-    private func applyModeVisibility(
-        outgoing: [NSView],
-        incoming: [NSView],
-        animated: Bool
-    ) {
-        let allViews = [
-            lookupSurface,
-            libraryRevealButton,
-            createSurface,
-            searchField,
-            scrollView,
-        ]
-        let isIncoming: (NSView) -> Bool = { view in
-            incoming.contains { $0 === view }
-        }
-        guard animated, panel.isVisible else {
-            allViews.forEach {
-                $0.isHidden = !isIncoming($0)
-                $0.alphaValue = 1
-            }
-            backButton.isHidden = mode == .lookup
-            backButton.alphaValue = 1
-            titleLabel.alphaValue = 1
-            contextLabel.alphaValue = 1
-            return
-        }
-
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.24
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            outgoing.filter { view in !isIncoming(view) }.forEach {
-                $0.animator().alphaValue = 0
-            }
-            incoming.forEach { $0.animator().alphaValue = 1 }
-            titleLabel.animator().alphaValue = 1
-            contextLabel.animator().alphaValue = 1
-            backButton.animator().alphaValue = mode == .lookup ? 0 : 1
-        } completionHandler: { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                let currentIncoming = self.modeViews(for: self.mode)
-                let currentViews = [
-                    self.lookupSurface,
-                    self.libraryRevealButton,
-                    self.createSurface,
-                    self.searchField,
-                    self.scrollView,
-                ]
-                currentViews.forEach { view in
-                    view.isHidden = !currentIncoming.contains { $0 === view }
-                    view.alphaValue = 1
-                }
-                self.backButton.isHidden = self.mode == .lookup
-                self.backButton.alphaValue = 1
-            }
         }
     }
 
@@ -817,6 +789,8 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
     private let isBuiltIn: Bool
     private let originalKey: String
     private let originalValue: String
+    private var isCopiedFeedback = false
+    private var copyFeedbackResetWorkItem: DispatchWorkItem?
 
     init(
         frame: NSRect,
@@ -836,51 +810,44 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
         self.onDelete = onDelete
         super.init(frame: frame)
 
-        ShortcutUIStyle.configureContentSurface(keySurface, cornerRadius: 12)
-        keySurface.layer?.backgroundColor = ShortcutUIStyle.userBubbleColor.cgColor
-        keySurface.layer?.borderColor = ShortcutUIStyle.userBubbleBorderColor.cgColor
-        ShortcutUIStyle.configureContentSurface(valueSurface, cornerRadius: 12)
+        ShortcutUIStyle.configureContentSurface(keySurface, cornerRadius: 10)
+        ShortcutUIStyle.configureContentSurface(valueSurface, cornerRadius: 10)
 
-        configureField(keyField, value: entry.key, width: 158)
-        configureField(valueField, value: entry.value, width: frame.width - 250)
-        keyField.font = .systemFont(ofSize: 13.5, weight: .semibold)
-        valueField.font = .systemFont(ofSize: 13.5)
+        configureField(keyField, value: entry.key)
+        configureField(valueField, value: entry.value)
+        keyField.font = .systemFont(ofSize: 13, weight: .semibold)
+        valueField.font = .systemFont(ofSize: 13)
         keyField.isEditable = !isDeleting && !isBuiltIn
         valueField.isEditable = !isDeleting && !isBuiltIn
         keyField.delegate = self
         valueField.delegate = self
-        if isDeleting || isBuiltIn {
-            keyField.textColor = ShortcutUIStyle.primaryTextColor
-            valueField.textColor = ShortcutUIStyle.secondaryTextColor
-        }
+        keyField.textColor = ShortcutUIStyle.primaryTextColor
+        valueField.textColor = isBuiltIn ? ShortcutUIStyle.secondaryTextColor : ShortcutUIStyle.primaryTextColor
 
         arrowImageView.image = NSImage(
             systemSymbolName: "arrow.right",
             accessibilityDescription: "Maps key to value"
         )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+            NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
         )
-        arrowImageView.contentTintColor = ShortcutUIStyle.accentColor
+        arrowImageView.contentTintColor = ShortcutUIStyle.secondaryTextColor.withAlphaComponent(0.6)
         arrowImageView.imageScaling = .scaleProportionallyDown
         arrowImageView.setAccessibilityLabel("Maps key to value")
 
         actionButton.isBordered = false
         actionButton.focusRingType = .none
-        actionButton.font = .systemFont(ofSize: 12, weight: .semibold)
+        actionButton.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        actionButton.imagePosition = .imageLeading
+        actionButton.imageScaling = .scaleProportionallyDown
         if isBuiltIn {
-            actionButton.image = NSImage(
-                systemSymbolName: "clock.arrow.circlepath",
-                accessibilityDescription: "Dynamic insertion"
-            )?.withSymbolConfiguration(
-                NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold)
-            )
-            actionButton.imagePosition = .imageLeading
+            actionButton.target = nil
+            actionButton.action = nil
         } else {
             actionButton.target = self
             actionButton.action = #selector(performAction)
         }
         actionButton.wantsLayer = true
-        actionButton.layer?.cornerRadius = 10
+        actionButton.layer?.cornerRadius = 9
         refreshActionAppearance()
 
         keySurface.addSubview(keyField)
@@ -898,25 +865,20 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
     override func layout() {
         super.layout()
         let actionWidth = fittedActionWidth
-        let keyWidth: CGFloat = 168
-        let valueX: CGFloat = 202
+        let keyWidth: CGFloat = 154
+        let arrowX: CGFloat = 162
+        let arrowWidth: CGFloat = 18
+        let valueX: CGFloat = 188
         let actionX = bounds.width - actionWidth
-        keySurface.frame = NSRect(x: 0, y: 2, width: keyWidth, height: 44)
-        keyField.frame = NSRect(x: 12, y: 0, width: keyWidth - 24, height: 44)
-        arrowImageView.frame = NSRect(x: 174, y: 13, width: 22, height: 22)
-        valueSurface.frame = NSRect(
-            x: valueX,
-            y: 2,
-            width: max(100, actionX - valueX - 10),
-            height: 44
-        )
-        valueField.frame = NSRect(
-            x: 12,
-            y: 0,
-            width: max(76, valueSurface.bounds.width - 24),
-            height: 44
-        )
-        actionButton.frame = NSRect(x: actionX, y: 7, width: actionWidth, height: 34)
+        let valueWidth = max(80, actionX - valueX - 8)
+        let itemHeight = bounds.height
+
+        keySurface.frame = NSRect(x: 0, y: 0, width: keyWidth, height: itemHeight)
+        keyField.frame = NSRect(x: 10, y: 0, width: keyWidth - 20, height: itemHeight)
+        arrowImageView.frame = NSRect(x: arrowX, y: floor((itemHeight - 18) / 2), width: arrowWidth, height: 18)
+        valueSurface.frame = NSRect(x: valueX, y: 0, width: valueWidth, height: itemHeight)
+        valueField.frame = NSRect(x: 10, y: 0, width: valueWidth - 20, height: itemHeight)
+        actionButton.frame = NSRect(x: actionX, y: floor((itemHeight - 32) / 2), width: actionWidth, height: 32)
     }
 
     private var hasChanges: Bool {
@@ -925,60 +887,91 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
 
     private var fittedActionWidth: CGFloat {
         let titleWidth = ceil((actionButton.title as NSString).size(
-            withAttributes: [.font: actionButton.font ?? NSFont.systemFont(ofSize: 12)]
+            withAttributes: [.font: actionButton.font ?? NSFont.systemFont(ofSize: 11.5, weight: .semibold)]
         ).width)
-        let imageWidth: CGFloat = actionButton.image == nil ? 0 : 17
-        return min(98, max(64, titleWidth + imageWidth + 22))
+        let imageWidth: CGFloat = actionButton.image == nil ? 0 : 16
+        return max(68, titleWidth + imageWidth + 22)
     }
 
     private func refreshActionAppearance() {
         let title: String
+        let symbol: String
         let tint: NSColor
         let background: NSColor
         let hoveredBackground: NSColor
         let border: NSColor
+        let isEnabled: Bool
 
-        if isBuiltIn {
+        if isCopiedFeedback {
+            title = "Copied"
+            symbol = "checkmark"
+            tint = ShortcutUIStyle.successAccentColor
+            background = ShortcutUIStyle.successAccentColor.withAlphaComponent(0.15)
+            hoveredBackground = ShortcutUIStyle.successAccentColor.withAlphaComponent(0.22)
+            border = ShortcutUIStyle.successAccentColor.withAlphaComponent(0.38)
+            isEnabled = true
+        } else if isBuiltIn {
             title = "Dynamic"
+            symbol = "clock.arrow.circlepath"
             tint = ShortcutUIStyle.accentColor
             background = ShortcutUIStyle.accentColor.withAlphaComponent(0.12)
-            hoveredBackground = ShortcutUIStyle.accentColor.withAlphaComponent(0.20)
-            border = ShortcutUIStyle.accentColor.withAlphaComponent(0.26)
-        } else if isDeleting || (isBrowsing && !hasChanges) {
+            hoveredBackground = ShortcutUIStyle.accentColor.withAlphaComponent(0.12)
+            border = ShortcutUIStyle.accentColor.withAlphaComponent(0.24)
+            isEnabled = false
+        } else if isDeleting {
             title = "Delete"
+            symbol = "trash"
             tint = ShortcutUIStyle.warningAccentColor
             background = ShortcutUIStyle.warningAccentColor.withAlphaComponent(0.12)
-            hoveredBackground = ShortcutUIStyle.warningAccentColor.withAlphaComponent(0.20)
-            border = ShortcutUIStyle.warningAccentColor.withAlphaComponent(0.25)
-        } else if isBrowsing {
-            title = "Modify"
+            hoveredBackground = ShortcutUIStyle.warningAccentColor.withAlphaComponent(0.22)
+            border = ShortcutUIStyle.warningAccentColor.withAlphaComponent(0.30)
+            isEnabled = true
+        } else if hasChanges {
+            title = "Save"
+            symbol = "checkmark.circle"
             tint = ShortcutUIStyle.primaryTextColor
-            background = ShortcutUIStyle.accentColor.withAlphaComponent(0.20)
-            hoveredBackground = ShortcutUIStyle.accentColor.withAlphaComponent(0.30)
-            border = ShortcutUIStyle.accentColor.withAlphaComponent(0.36)
+            background = ShortcutUIStyle.accentColor.withAlphaComponent(0.85)
+            hoveredBackground = ShortcutUIStyle.accentColor
+            border = ShortcutUIStyle.accentColor
+            let validEdit = !keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !valueField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            isEnabled = validEdit
+        } else if isBrowsing {
+            title = "Copy"
+            symbol = "doc.on.doc"
+            tint = ShortcutUIStyle.secondaryTextColor
+            background = ShortcutUIStyle.raisedSurfaceColor
+            hoveredBackground = ShortcutUIStyle.raisedSurfaceColor.blended(withFraction: 0.15, of: .white) ?? ShortcutUIStyle.raisedSurfaceColor
+            border = ShortcutUIStyle.contentBorderColor
+            isEnabled = true
         } else {
             title = "Save"
-            tint = ShortcutUIStyle.primaryTextColor
-            background = ShortcutUIStyle.accentColor.withAlphaComponent(0.20)
-            hoveredBackground = ShortcutUIStyle.accentColor.withAlphaComponent(0.30)
-            border = ShortcutUIStyle.accentColor.withAlphaComponent(0.36)
+            symbol = "checkmark.circle"
+            tint = ShortcutUIStyle.secondaryTextColor
+            background = ShortcutUIStyle.accentColor.withAlphaComponent(0.15)
+            hoveredBackground = ShortcutUIStyle.accentColor.withAlphaComponent(0.22)
+            border = ShortcutUIStyle.accentColor.withAlphaComponent(0.25)
+            isEnabled = false
         }
 
         actionButton.title = title
+        actionButton.image = NSImage(
+            systemSymbolName: symbol,
+            accessibilityDescription: title
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold)
+        )
         actionButton.contentTintColor = tint
         actionButton.setBackgroundColors(normal: background, hovered: hoveredBackground)
         actionButton.layer?.borderWidth = 1
         actionButton.layer?.borderColor = border.cgColor
         actionButton.setAccessibilityLabel("\(title) insertion")
-
-        let validEdit = !keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !valueField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        actionButton.isEnabled = !isBrowsing || !hasChanges || validEdit
-        actionButton.alphaValue = actionButton.isEnabled ? 1 : 0.38
+        actionButton.isEnabled = isEnabled
+        actionButton.alphaValue = isEnabled || isBuiltIn ? 1 : 0.40
         needsLayout = true
     }
 
-    private func configureField(_ field: NSTextField, value: String, width: CGFloat) {
+    private func configureField(_ field: NSTextField, value: String) {
         field.cell = VerticallyCenteredTextFieldCell(textCell: "")
         field.stringValue = value
         field.isSelectable = true
@@ -986,12 +979,9 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
         field.isBezeled = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = .systemFont(ofSize: 13)
-        field.textColor = ShortcutUIStyle.primaryTextColor
         field.maximumNumberOfLines = 1
         field.lineBreakMode = .byTruncatingTail
         field.cell?.usesSingleLineMode = true
-        field.frame.size.width = width
     }
 
     func controlTextDidBeginEditing(_ notification: Notification) {
@@ -1000,7 +990,7 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
     }
 
     func controlTextDidChange(_ notification: Notification) {
-        guard isBrowsing, !isBuiltIn else { return }
+        guard !isBuiltIn else { return }
         refreshActionAppearance()
     }
 
@@ -1019,7 +1009,7 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
         }
         if control === keyField {
             window?.makeFirstResponder(valueField)
-        } else if !isBrowsing || hasChanges {
+        } else {
             performAction()
         }
         return true
@@ -1033,11 +1023,100 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
     }
 
     @objc private func performAction() {
-        if isDeleting || (isBrowsing && !hasChanges) {
+        if isDeleting {
             onDelete(id)
-        } else {
-            onSave(id, keyField.stringValue, valueField.stringValue)
+        } else if hasChanges {
+            let k = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let v = valueField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !k.isEmpty, !v.isEmpty else { return }
+            onSave(id, k, v)
+        } else if isBrowsing {
+            copyValue()
         }
+    }
+
+    private func copyValue() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(valueField.stringValue, forType: .string)
+        copyFeedbackResetWorkItem?.cancel()
+        isCopiedFeedback = true
+        refreshActionAppearance()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.isCopiedFeedback = false
+            self.refreshActionAppearance()
+        }
+        copyFeedbackResetWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem)
+    }
+}
+
+private final class InsetSearchFieldCell: NSSearchFieldCell {
+    override func searchTextRect(forBounds rect: NSRect) -> NSRect {
+        let leftInset: CGFloat = 36
+        let rightInset: CGFloat = 28
+        let font = self.font ?? .systemFont(ofSize: 13.5)
+        let naturalHeight: CGFloat = ceil(font.ascender - font.descender + font.leading + 2)
+        let y = floor((rect.height - naturalHeight) / 2)
+        return NSRect(
+            x: leftInset,
+            y: y,
+            width: max(0, rect.width - leftInset - rightInset),
+            height: naturalHeight
+        )
+    }
+
+    override func searchButtonRect(forBounds rect: NSRect) -> NSRect {
+        var r = super.searchButtonRect(forBounds: rect)
+        r.origin.x = 12
+        r.origin.y = floor((rect.height - r.height) / 2)
+        return r
+    }
+
+    override func cancelButtonRect(forBounds rect: NSRect) -> NSRect {
+        var r = super.cancelButtonRect(forBounds: rect)
+        r.origin.x = rect.width - r.width - 10
+        r.origin.y = floor((rect.height - r.height) / 2)
+        return r
+    }
+
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        searchTextRect(forBounds: rect)
+    }
+
+    override func edit(
+        withFrame rect: NSRect,
+        in controlView: NSView,
+        editor textObj: NSText,
+        delegate: Any?,
+        event: NSEvent?
+    ) {
+        super.edit(
+            withFrame: searchTextRect(forBounds: rect),
+            in: controlView,
+            editor: textObj,
+            delegate: delegate,
+            event: event
+        )
+    }
+
+    override func select(
+        withFrame rect: NSRect,
+        in controlView: NSView,
+        editor textObj: NSText,
+        delegate: Any?,
+        start selStart: Int,
+        length selLength: Int
+    ) {
+        super.select(
+            withFrame: searchTextRect(forBounds: rect),
+            in: controlView,
+            editor: textObj,
+            delegate: delegate,
+            start: selStart,
+            length: selLength
+        )
     }
 }
 
@@ -1136,44 +1215,73 @@ private final class InsertActionButton: NSButton {
     private func updateBackground() {
         layer?.backgroundColor = (isHovered ? hoveredBackgroundColor : normalBackgroundColor).cgColor
     }
+
+    override func resetCursorRects() {
+        if isEnabled && target != nil {
+            addCursorRect(bounds, cursor: .pointingHand)
+        }
+    }
 }
 
-private final class LibraryButton: NSButton {
+private final class ThinLibraryButton: NSButton {
+    private var trackingArea: NSTrackingArea?
+    private var isHovered = false
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        title = "View library"
+        title = ""
         isBordered = false
         focusRingType = .none
-        font = .systemFont(ofSize: 11.5, weight: .medium)
-        contentTintColor = ShortcutUIStyle.secondaryTextColor
-        image = NSImage(
-            systemSymbolName: "list.bullet.rectangle",
-            accessibilityDescription: "View library"
-        )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
-        )
-        imagePosition = .imageLeading
-        imageScaling = .scaleProportionallyDown
-        alignment = .center
+        imagePosition = .noImage
         setButtonType(.momentaryChange)
-        wantsLayer = true
-        layer?.cornerRadius = 8
     }
 
     required init?(coder: NSCoder) {
         nil
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        if isHighlighted {
-            ShortcutUIStyle.accentColor.withAlphaComponent(0.12).setFill()
-            NSBezierPath(
-                roundedRect: bounds.insetBy(dx: 1, dy: 1),
-                xRadius: 8,
-                yRadius: 8
-            ).fill()
+    override func updateTrackingAreas() {
+        if let trackingArea {
+            removeTrackingArea(trackingArea)
         }
-        super.draw(dirtyRect)
+        let options: NSTrackingArea.Options = [
+            .mouseEnteredAndExited,
+            .activeInKeyWindow,
+            .inVisibleRect,
+        ]
+        let trackingArea = NSTrackingArea(rect: bounds, options: options, owner: self)
+        addTrackingArea(trackingArea)
+        self.trackingArea = trackingArea
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let pill = NSRect(
+            x: bounds.midX - 22,
+            y: bounds.midY - 1,
+            width: 44,
+            height: 2
+        )
+        let color: NSColor
+        if isHighlighted {
+            color = ShortcutUIStyle.accentColor.withAlphaComponent(0.9)
+        } else if isHovered {
+            color = ShortcutUIStyle.secondaryTextColor.withAlphaComponent(0.85)
+        } else {
+            color = ShortcutUIStyle.secondaryTextColor.withAlphaComponent(0.45)
+        }
+        color.setFill()
+        NSBezierPath(roundedRect: pill, xRadius: 1, yRadius: 1).fill()
     }
 
     override func resetCursorRects() {
@@ -1187,5 +1295,32 @@ private final class FlippedView: NSView {
 
 private final class InsertPanel: NSPanel {
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
+    override var canBecomeMain: Bool { true }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags == .command {
+            switch event.charactersIgnoringModifiers {
+            case "v":
+                if NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self) {
+                    return true
+                }
+            case "c":
+                if NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: self) {
+                    return true
+                }
+            case "x":
+                if NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: self) {
+                    return true
+                }
+            case "a":
+                if NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: self) {
+                    return true
+                }
+            default:
+                break
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 }

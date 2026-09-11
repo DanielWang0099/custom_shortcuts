@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -14,6 +15,9 @@ enum InputLockMode: String, Sendable {
 }
 
 final class InputLockService: @unchecked Sendable {
+    private static let systemDefinedRawValue: UInt32 = 14
+    private static let auxMouseButtonSubtype: Int16 = 7
+
     private let stateLock = NSLock()
     private let unlockHandler: @Sendable () -> Void
     private var activeMode: InputLockMode?
@@ -35,6 +39,7 @@ final class InputLockService: @unchecked Sendable {
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
             | CGEventMask(1 << CGEventType.keyUp.rawValue)
             | CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+            | CGEventMask(1 << Self.systemDefinedRawValue)
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -79,7 +84,7 @@ final class InputLockService: @unchecked Sendable {
     }
 
     private func process(type: CGEventType, event: CGEvent) -> Bool {
-        if type == .tapDisabledByTimeout {
+        if type == .tapDisabledByTimeout || type.rawValue == 0xFFFFFFFF {
             if let tap = stateLock.withLock({ eventTap }) {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
@@ -105,9 +110,21 @@ final class InputLockService: @unchecked Sendable {
 
         switch mode {
         case .keyboard:
-            return type == .keyDown || type == .keyUp || type == .flagsChanged
+            if type == .keyDown || type == .keyUp || type == .flagsChanged {
+                return true
+            }
+            if type.rawValue == Self.systemDefinedRawValue {
+                // Filter out mouse auxiliary buttons if delivered as system-defined
+                if let nsEvent = NSEvent(cgEvent: event), nsEvent.subtype.rawValue == Self.auxMouseButtonSubtype {
+                    return false
+                }
+                // Suppress upper keyboard row F1-F12 media, brightness, volume, and control keys
+                return true
+            }
+            return false
         case .shortcuts:
-            return (type == .keyDown || type == .keyUp) && !activeShortcutFlags.isEmpty
+            let isKeyOrSystem = type == .keyDown || type == .keyUp || type.rawValue == Self.systemDefinedRawValue
+            return isKeyOrSystem && !activeShortcutFlags.isEmpty
         }
     }
 

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">AI Shortcuts</title>
+  <rect x="40" y="40" width="944" height="944" rx="225" fill="#1b1c20" stroke="#8074fb" stroke-opacity=".48" stroke-width="12"/>
+  <path d="M225 430c102-108 214-108 337 0 77 67 113 63 238-30" fill="none" stroke="#8074fb" stroke-width="88" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M225 594c102 108 214 108 337 0 77-67 113-63 238 30" fill="none" stroke="#b0a7ff" stroke-width="88" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M796 194l18 56 56 18-56 18-18 56-18-56-56-18 56-18z" fill="#fff"/>
+</svg>

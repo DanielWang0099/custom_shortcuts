@@ -40,8 +40,8 @@ struct CoreChecks {
         failures += await run("sequential clipboard cross-window capture", sequentialClipboardCaptureChecks)
         failures += await run("sequential clipboard single press", sequentialClipboardSinglePressChecks)
         failures += await run("Insert matching and privacy", insertMatchingChecks)
-        failures += await run("daily token budget", tokenBudgetChecks)
         failures += await run("Responses request contract", requestContractCheck)
+        failures += await run("configurable provider requests", configurableProviderRequestCheck)
         failures += await run("mocked Responses success", mockedSuccessCheck)
         failures += await run("mocked Responses errors", mockedErrorChecks)
 
@@ -162,7 +162,7 @@ struct CoreChecks {
                 && refine.allowedOutputFormats == [.markdown]
                 && format.outputSchema == .textDocument
                 && format.allowedOutputFormats == [.markdown]
-                && explain.outputSchema == .textDocument
+                && explain.outputSchema == .explanationResponse
                 && explain.allowedOutputFormats == [.plainText, .markdown],
             "Prompts did not carry their strict document output contracts."
         )
@@ -222,6 +222,22 @@ struct CoreChecks {
                 AIOutputDocument(format: .markdown, source: "[unsafe](<javascript:alert(1)>)")
             )
             throw CheckFailure(description: "Angle-bracket unsafe links were accepted.")
+        } catch AIOutputValidationError.unsafeLink {
+            // Expected.
+        }
+        do {
+            try AIOutputDocumentValidator.validate(
+                AIOutputDocument(format: .plainText, source: "Result: <script>evil()</script>")
+            )
+            throw CheckFailure(description: "Dangerous HTML tags were accepted in plain_text output.")
+        } catch AIOutputValidationError.rawHTML {
+            // Expected.
+        }
+        do {
+            try AIOutputDocumentValidator.validate(
+                AIOutputDocument(format: .plainText, source: "javascript:doEvil()")
+            )
+            throw CheckFailure(description: "Executable URI schemes were accepted in plain_text output.")
         } catch AIOutputValidationError.unsafeLink {
             // Expected.
         }
@@ -325,6 +341,70 @@ struct CoreChecks {
         } catch ResponsesAPIError.incomplete("max_output_tokens") {
             // Expected.
         }
+
+        let trailingGlitchPayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"plain_text\",\"content\":\"I'm not sure what you mean by \\\"ehaiefa\\\".\"}'}## assistant to=final spam"}]}]}"##.utf8
+        )
+        let glitchParsed = try ResponsesAPIClient.parseCompletion(
+            from: trailingGlitchPayload,
+            outputSchema: .textDocument,
+            allowedOutputFormats: [.plainText]
+        )
+        try expect(
+            glitchParsed.output.format == .plainText
+                && glitchParsed.output.source.contains("I'm not sure what you mean")
+                && !glitchParsed.output.source.contains("assistant to=final")
+                && !glitchParsed.output.source.contains("spam"),
+            "Trailing glitch envelope was not cleanly parsed and sanitized."
+        )
+
+        let calculateFencedGlitchPayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"```json\n{\"format\":\"plain_text\",\"answer\":\"$42.50\"}\n```\n## assistant\nextra"}]}]}"##.utf8
+        )
+        let calculateFencedParsed = try ResponsesAPIClient.parseCompletion(
+            from: calculateFencedGlitchPayload,
+            outputSchema: .calculateAnswer,
+            allowedOutputFormats: [.plainText, .markdown]
+        )
+        try expect(
+            calculateFencedParsed.output == AIOutputDocument(
+                format: .plainText,
+                source: "$42.50"
+            ),
+            "Fenced calculate answer with trailing glitch tokens was not extracted and sanitized."
+        )
+
+        let explainPayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"format\":\"markdown\",\"explanation\":\"**Photosynthesis** converts light into chemical energy.\"}"}]}]}"##.utf8
+        )
+        let explainParsed = try ResponsesAPIClient.parseCompletion(
+            from: explainPayload,
+            outputSchema: .explanationResponse,
+            allowedOutputFormats: [.plainText, .markdown]
+        )
+        try expect(
+            explainParsed.output == AIOutputDocument(
+                format: .markdown,
+                source: "**Photosynthesis** converts light into chemical energy."
+            ),
+            "Explain AI output was not parsed under explanationResponse contract."
+        )
+
+        let explainGlitchPayload = Data(
+            ##"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"```json\n{\"format\":\"plain_text\",\"explanation\":\"Gravitational force diminishes with distance.\"}## assistant to=final\n```"}]}]}"##.utf8
+        )
+        let explainGlitchParsed = try ResponsesAPIClient.parseCompletion(
+            from: explainGlitchPayload,
+            outputSchema: .explanationResponse,
+            allowedOutputFormats: [.plainText, .markdown]
+        )
+        try expect(
+            explainGlitchParsed.output == AIOutputDocument(
+                format: .plainText,
+                source: "Gravitational force diminishes with distance."
+            ),
+            "Explain AI answer with glitch tokens and code fences was not cleanly extracted."
+        )
     }
 
     private static func promptAndPolicyChecks() async throws {
@@ -403,6 +483,7 @@ struct CoreChecks {
         )
         try expect(
             refine.inputText == "This are a test."
+                && refine.reasoningEffort == .medium
                 && refine.instructions.contains("Preserve the original meaning")
                 && refine.instructions.contains("Spanish, English, Chinese, and Japanese")
                 && refine.instructions.contains("never translate or switch languages")
@@ -420,7 +501,9 @@ struct CoreChecks {
             parameter: "email with bullets"
         )
         try expect(
-            translate.instructions.contains("Japanese, formal")
+            translate.reasoningEffort == .medium
+                && format.reasoningEffort == .medium
+                && translate.instructions.contains("Japanese, formal")
                 && format.instructions.contains("email with bullets")
                 && format.instructions.contains("Spanish, English, Chinese, and Japanese")
                 && format.instructions.contains("unless the format instruction explicitly requests translation"),
@@ -434,13 +517,13 @@ struct CoreChecks {
         )
         try expect(
             explain.model == AppConstants.fullModel
-                && explain.maxOutputTokens == 768
+                && explain.maxOutputTokens == AppConstants.maximumOutputTokens
                 && explain.inputText.contains("Earlier explanation")
                 && explain.inputText.contains("Current hidden selected text")
                 && explain.inputText.contains("Explain the hidden selected text")
                 && explain.instructions.contains("briefly")
                 && explain.instructions.contains("general chat question")
-                && explain.reasoningEffort == .low,
+                && explain.reasoningEffort == .high,
             "Explain lost its full-model, hidden-selection, memory, or brevity contract."
         )
         let generalChat = PromptBuilder.make(
@@ -670,58 +753,6 @@ struct CoreChecks {
         )
     }
 
-    private static func tokenBudgetChecks() async throws {
-        try expect(
-            AppConstants.fullDailyBudgetLimit == 1_000_000,
-            "The full-model daily guard must match this account's allowance."
-        )
-        let date = Date(timeIntervalSince1970: 1_700_000_000)
-        var ledger = DailyBudgetLedger(limit: 100, state: nil, now: date)
-        _ = ledger.reserve(70, now: date)
-        try expect(
-            ledger.reserve(31, now: date)
-                == .refused(remaining: 30, requested: 31),
-            "Budget did not refuse a request that crosses the cap."
-        )
-
-        let beforeMidnight = ISO8601DateFormatter().date(
-            from: "2026-07-27T23:59:59Z"
-        )!
-        let afterMidnight = ISO8601DateFormatter().date(
-            from: "2026-07-28T00:00:01Z"
-        )!
-        var resetLedger = DailyBudgetLedger(
-            limit: 100,
-            state: DailyBudgetState(
-                utcDay: DailyBudgetLedger.utcDay(for: beforeMidnight),
-                reservedTokens: 90
-            ),
-            now: beforeMidnight
-        )
-        resetLedger.normalize(now: afterMidnight)
-        try expect(
-            resetLedger.remaining == 100
-                && resetLedger.state.utcDay == "2026-07-28",
-            "Budget did not reset at the UTC date boundary."
-        )
-
-        let text = PromptBuilder.make(action: .refine, selectedText: "abc")
-        try expect(
-            TokenEstimator.textReservation(for: text)
-                >= text.maxOutputTokens + AppConstants.budgetSafetyMargin,
-            "Text reservation omitted output or safety margin."
-        )
-        let image = PromptBuilder.make(action: .ocr)
-        try expect(
-            TokenEstimator.imageReservation(
-                for: image,
-                pixelWidth: 64,
-                pixelHeight: 96
-            ) >= image.maxOutputTokens + AppConstants.budgetSafetyMargin + 6,
-            "Image reservation omitted patch, output, or safety costs."
-        )
-    }
-
     private static func sequentialClipboardChecks() async throws {
         var queue = FIFOQueue<String>()
         queue.enqueue("Daniel")
@@ -742,6 +773,36 @@ struct CoreChecks {
             queue.count == 1 && queue.dequeue() == "fresh",
             "A new clipboard session did not start with a fresh queue."
         )
+
+        // Test paste session FIFO sequence ensuring first copy is never skipped:
+        var pasteSourceQueue = FIFOQueue<String>()
+        pasteSourceQueue.enqueue("First Item")
+        pasteSourceQueue.enqueue("Second Item")
+        pasteSourceQueue.enqueue("Third Item")
+
+        var session = ClipboardQueuePasteSession(queue: &pasteSourceQueue)
+        try expect(session.count == 3, "Initial paste session count should be 3.")
+        try expect(session.current == "First Item", "First paste must be the first copied item.")
+        try expect(!session.isComplete, "Session should not be complete before pasting.")
+
+        // After first paste is consumed, advance to second item:
+        let second = session.advance()
+        try expect(second == "Second Item", "After first paste, session must advance to second item.")
+        try expect(session.current == "Second Item", "Current payload must be Second Item.")
+        try expect(session.count == 2, "Remaining paste count should be 2.")
+
+        // After second paste is consumed, advance to third item:
+        let third = session.advance()
+        try expect(third == "Third Item", "After second paste, session must advance to third item.")
+        try expect(session.current == "Third Item", "Current payload must be Third Item.")
+        try expect(session.count == 1, "Remaining paste count should be 1.")
+
+        // After third paste is consumed, advance to completion:
+        let end = session.advance()
+        try expect(end == nil, "After final paste, advance must return nil.")
+        try expect(session.current == nil, "Current payload must be nil when complete.")
+        try expect(session.count == 0, "Remaining paste count should be 0.")
+        try expect(session.isComplete, "Session must report complete when all items are pasted.")
     }
 
     private static func sequentialClipboardCaptureChecks() async throws {
@@ -758,6 +819,13 @@ struct CoreChecks {
         try expect(!tracker.beginKeyDown(), "A held copy key generated a duplicate capture.")
         try expect(tracker.endKeyUp(), "The copy key-up did not finish the press.")
         try expect(!tracker.endKeyUp(), "A repeated copy key-up generated a duplicate capture.")
+
+        // Window switch recovery check: if keyUp was missed during a window switch,
+        // reset() clears the press state so the next window can immediately capture.
+        try expect(tracker.beginKeyDown(), "Key-down before window switch was not accepted.")
+        tracker.reset()
+        try expect(tracker.beginKeyDown(), "Key-down after window switch reset was rejected.")
+        try expect(tracker.endKeyUp(), "Key-up after window switch was not accepted.")
     }
 
     private static func insertMatchingChecks() async throws {
@@ -790,8 +858,8 @@ struct CoreChecks {
             candidateKeys: entries.map(\.key)
         )
         try expect(
-            prompt.reasoningEffort == .low
-                && prompt.maxOutputTokens == 32
+            prompt.reasoningEffort == .medium
+                && prompt.maxOutputTokens == 1_024
                 && prompt.inputText.contains("University")
                 && !prompt.inputText.contains("daniel@example.com")
                 && !prompt.inputText.contains("work@example.com")
@@ -905,8 +973,28 @@ struct CoreChecks {
         )
         try expect(
             (translationJSON["reasoning"] as? [String: Any])?["effort"] as? String
-                == "none",
-            "Translate should keep non-reasoning latency."
+                == "medium",
+            "Translate should use medium reasoning for fast, nuanced responses."
+        )
+
+        let explainRequest = try client.makeRequest(
+            prompt: PromptBuilder.make(action: .explain, parameter: "Explain gravity"),
+            imagePNGs: [],
+            apiKey: "not-a-real-key",
+            safetyIdentifier: "test-safety-id"
+        )
+        let explainBody = try require(
+            explainRequest.httpBody,
+            "Explain request body was missing."
+        )
+        let explainJSON = try require(
+            try JSONSerialization.jsonObject(with: explainBody) as? [String: Any],
+            "Explain request body was not a JSON object."
+        )
+        try expect(
+            (explainJSON["reasoning"] as? [String: Any])?["effort"] as? String
+                == "high",
+            "Explain should use high reasoning for deep answers."
         )
 
         let calculateRequest = try client.makeRequest(
@@ -959,6 +1047,200 @@ struct CoreChecks {
         try expect(
             (plainText["format"] as? [String: Any])?["type"] as? String == "json_schema",
             "Normal AI shortcuts must send a strict JSON document schema."
+        )
+    }
+
+    private static func configurableProviderRequestCheck() async throws {
+        let openAIConfiguration = AIProviderConfiguration(
+            provider: .openAICompatible,
+            endpoint: URL(string: "https://example.test/v1/chat/completions")!,
+            model: "custom-openai-model"
+        )
+        let anthropicConfiguration = AIProviderConfiguration(
+            provider: .anthropic,
+            endpoint: URL(string: "https://example.test/v1/messages")!,
+            model: "custom-anthropic-model"
+        )
+        try expect(
+            openAIConfiguration.validationMessage == nil
+                && anthropicConfiguration.validationMessage == nil
+                && AIProviderConfiguration(
+                    provider: .anthropic,
+                    endpoint: URL(string: "file:///tmp/messages")!,
+                    model: "model"
+                ).validationMessage != nil,
+            "Provider configuration validation accepted an invalid endpoint."
+        )
+        try expect(
+            AIProviderConfiguration.defaultConfiguration(for: .openAICompatible).model
+                == AppConstants.fullModel
+                && AIProviderConfiguration.defaultConfiguration(for: .anthropic).model
+                == AppConstants.anthropicModel,
+            "Provider defaults did not match the configured first-party models."
+        )
+
+        let requestClient = AIProviderClient(transport: MockTransport { _ in
+            throw URLError(.badServerResponse)
+        })
+        let openAIRequest = try requestClient.makeRequest(
+            prompt: PromptBuilder.make(action: .ocr),
+            imagePNGs: [Data([0x89, 0x50, 0x4E, 0x47])],
+            apiKey: "test-secret-key-not-real",
+            safetyIdentifier: "test-safety-id",
+            configuration: openAIConfiguration
+        )
+        try expect(
+            openAIRequest.url == openAIConfiguration.endpoint
+                && openAIRequest.value(forHTTPHeaderField: "Authorization")
+                    == "Bearer test-secret-key-not-real",
+            "OpenAI-compatible request did not use the selected endpoint or auth scheme."
+        )
+        let openAIBody = try require(
+            try JSONSerialization.jsonObject(
+                with: require(openAIRequest.httpBody, "OpenAI-compatible body was missing.")
+            ) as? [String: Any],
+            "OpenAI-compatible body was not a JSON object."
+        )
+        let openAIMessages = try require(
+            openAIBody["messages"] as? [[String: Any]],
+            "OpenAI-compatible messages were missing."
+        )
+        let openAIUserContent = try require(
+            openAIMessages.last?["content"] as? [[String: Any]],
+            "OpenAI-compatible user content was missing."
+        )
+        let openAIResponseFormat = try require(
+            openAIBody["response_format"] as? [String: Any],
+            "OpenAI-compatible JSON response format was missing."
+        )
+        let openAIJSONSchema = try require(
+            openAIResponseFormat["json_schema"] as? [String: Any],
+            "OpenAI-compatible JSON schema wrapper was missing."
+        )
+        try expect(
+            openAIBody["model"] as? String == "custom-openai-model"
+                && openAIBody["max_completion_tokens"] as? Int == AppConstants.maximumOutputTokens
+                && openAIMessages.first?["role"] as? String == "system"
+                && openAIUserContent.contains(where: { $0["type"] as? String == "image_url" })
+                && openAIResponseFormat["type"] as? String == "json_schema"
+                && openAIJSONSchema["strict"] as? Bool == true,
+            "OpenAI-compatible request did not preserve the app's model and output contract."
+        )
+
+        let anthropicRequest = try requestClient.makeRequest(
+            prompt: PromptBuilder.make(action: .ocr),
+            imagePNGs: [Data([0x89, 0x50, 0x4E, 0x47])],
+            apiKey: "test-secret-key-not-real",
+            safetyIdentifier: "test-safety-id",
+            configuration: anthropicConfiguration
+        )
+        try expect(
+            anthropicRequest.url == anthropicConfiguration.endpoint
+                && anthropicRequest.value(forHTTPHeaderField: "x-api-key")
+                    == "test-secret-key-not-real"
+                && anthropicRequest.value(forHTTPHeaderField: "anthropic-version")
+                    == "2023-06-01",
+            "Anthropic request did not use the selected endpoint or required headers."
+        )
+        let anthropicBody = try require(
+            try JSONSerialization.jsonObject(
+                with: require(anthropicRequest.httpBody, "Anthropic body was missing.")
+            ) as? [String: Any],
+            "Anthropic body was not a JSON object."
+        )
+        let anthropicMessages = try require(
+            anthropicBody["messages"] as? [[String: Any]],
+            "Anthropic messages were missing."
+        )
+        let anthropicUserContent = try require(
+            anthropicMessages.first?["content"] as? [[String: Any]],
+            "Anthropic user content was missing."
+        )
+        let anthropicOutputConfig = try require(
+            anthropicBody["output_config"] as? [String: Any],
+            "Anthropic output configuration was missing."
+        )
+        try expect(
+            anthropicBody["model"] as? String == "custom-anthropic-model"
+                && anthropicBody["max_tokens"] as? Int == AppConstants.maximumOutputTokens
+                && anthropicBody["system"] as? String == PromptBuilder.make(action: .ocr).instructions
+                && anthropicMessages.first?["role"] as? String == "user"
+                && anthropicUserContent.contains(where: { $0["type"] as? String == "image" })
+                && (anthropicOutputConfig["format"] as? [String: Any])?["type"] as? String
+                    == "json_schema",
+            "Anthropic request did not preserve the app's model and output contract."
+        )
+
+        let openAIPayload = Data(
+            #"""
+            {
+              "choices": [{
+                "message": {
+                  "role": "assistant",
+                  "content": "{\"format\":\"plain_text\",\"content\":\"Configured.\"}"
+                },
+                "finish_reason": "stop"
+              }],
+              "model": "custom-openai-model",
+              "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
+            }
+            """#.utf8
+        )
+        let openAICompletionClient = AIProviderClient(transport: MockTransport { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/2",
+                headerFields: nil
+            )!
+            return (openAIPayload, response)
+        })
+        let openAICompletion = try await openAICompletionClient.complete(
+            prompt: PromptBuilder.make(action: .refine, selectedText: "Text"),
+            apiKey: "test-secret-key-not-real",
+            safetyIdentifier: "test-safety-id",
+            configuration: openAIConfiguration
+        )
+        try expect(
+            openAICompletion.text == "Configured."
+                && openAICompletion.model == "custom-openai-model"
+                && openAICompletion.totalTokens == 6,
+            "OpenAI-compatible completion was not parsed through the shared output contract."
+        )
+
+        let anthropicPayload = Data(
+            #"""
+            {
+              "content": [{
+                "type": "text",
+                "text": "{\"format\":\"plain_text\",\"explanation\":\"Anthropic.\"}"
+              }],
+              "model": "custom-anthropic-model",
+              "stop_reason": "end_turn",
+              "usage": {"input_tokens": 4, "output_tokens": 2}
+            }
+            """#.utf8
+        )
+        let anthropicCompletionClient = AIProviderClient(transport: MockTransport { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/2",
+                headerFields: nil
+            )!
+            return (anthropicPayload, response)
+        })
+        let anthropicCompletion = try await anthropicCompletionClient.complete(
+            prompt: PromptBuilder.make(action: .explain, parameter: "Explain this"),
+            apiKey: "test-secret-key-not-real",
+            safetyIdentifier: "test-safety-id",
+            configuration: anthropicConfiguration
+        )
+        try expect(
+            anthropicCompletion.text == "Anthropic."
+                && anthropicCompletion.model == "custom-anthropic-model"
+                && anthropicCompletion.totalTokens == 6,
+            "Anthropic completion was not parsed through the shared output contract."
         )
     }
 
