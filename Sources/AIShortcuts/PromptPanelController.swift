@@ -12,6 +12,8 @@ final class PromptPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var finished = false
     private var allowsEmptySubmission = false
 
+    var isVisible: Bool { panel.isVisible }
+
     override init() {
         panel = InputPanel(
             contentRect: NSRect(x: 0, y: 0, width: 500, height: 108),

@@ -2,38 +2,115 @@ import Foundation
 
 public protocol HTTPTransport: Sendable {
     func data(for request: URLRequest) async throws -> (Data, URLResponse)
+    func prepare()
+    func preconnect(to endpoint: URL) async
+    func suspend()
+}
+
+public extension HTTPTransport {
+    func prepare() {
+    }
+
+    func preconnect(to endpoint: URL) async {
+        _ = endpoint
+    }
+
+    func suspend() {
+    }
 }
 
 public final class URLSessionHTTPTransport: HTTPTransport, @unchecked Sendable {
-    private static let idleSessionLifetime: TimeInterval = 8
+    private static let preconnectCooldown: TimeInterval = 20
 
     private let stateLock = NSLock()
     private let managesSessionLifecycle: Bool
     private var session: URLSession?
-    private var lastUsedAt: Date?
+    private var lastNetworkActivityAt: Date?
 
     public init() {
         managesSessionLifecycle = true
         session = nil
-        lastUsedAt = nil
+        lastNetworkActivityAt = nil
     }
 
     public init(session: URLSession) {
         managesSessionLifecycle = false
         self.session = session
-        lastUsedAt = nil
+        lastNetworkActivityAt = nil
+    }
+
+    deinit {
+        if managesSessionLifecycle {
+            session?.invalidateAndCancel()
+        }
     }
 
     public func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        let activeSession = sessionForRequest()
+        let activeSession = sessionForRequest(markNetworkActivity: true)
         do {
-            return try await activeSession.data(for: request)
+            let result = try await activeSession.data(for: request)
+            markNetworkActivity(for: activeSession)
+            return result
         } catch {
             if NetworkRetryPolicy.shouldRetry(error) {
                 discardManagedSession(activeSession)
             }
             throw error
         }
+    }
+
+    public func prepare() {
+        guard managesSessionLifecycle else {
+            return
+        }
+        _ = sessionForRequest(markNetworkActivity: false)
+    }
+
+    public func preconnect(to endpoint: URL) async {
+        guard managesSessionLifecycle,
+              let activeSession = reservePreconnectSession()
+        else {
+            return
+        }
+
+        // HEAD against the endpoint's origin performs DNS, TCP, TLS, and HTTP
+        // negotiation without touching a completion route or sending a model
+        // request or credentials. The real request can reuse the connection.
+        var components = URLComponents(
+            url: endpoint,
+            resolvingAgainstBaseURL: false
+        )
+        components?.path = "/"
+        components?.percentEncodedQuery = nil
+        components?.fragment = nil
+        let connectionURL = components?.url ?? endpoint
+        var request = URLRequest(
+            url: connectionURL,
+            cachePolicy: .reloadIgnoringLocalCacheData,
+            timeoutInterval: 4
+        )
+        request.httpMethod = "HEAD"
+        request.networkServiceType = .responsiveData
+        do {
+            _ = try await activeSession.data(for: request)
+            markNetworkActivity(for: activeSession)
+        } catch {
+            // Preconnection is advisory. The real request retains its normal
+            // error handling and one-shot retry policy.
+        }
+    }
+
+    public func suspend() {
+        guard managesSessionLifecycle else {
+            return
+        }
+        let oldSession = stateLock.withLock { () -> URLSession? in
+            let oldSession = session
+            session = nil
+            lastNetworkActivityAt = nil
+            return oldSession
+        }
+        oldSession?.invalidateAndCancel()
     }
 
     private static func makeSession() -> URLSession {
@@ -45,29 +122,53 @@ public final class URLSessionHTTPTransport: HTTPTransport, @unchecked Sendable {
         configuration.timeoutIntervalForResource = 60
         configuration.waitsForConnectivity = false
         configuration.httpMaximumConnectionsPerHost = 2
+        configuration.networkServiceType = .responsiveData
         return URLSession(configuration: configuration)
     }
 
-    private func sessionForRequest(now: Date = Date()) -> URLSession {
+    private func sessionForRequest(
+        markNetworkActivity: Bool,
+        now: Date = Date()
+    ) -> URLSession {
         stateLock.lock()
         defer { stateLock.unlock() }
 
         if !managesSessionLifecycle, let session {
             return session
         }
-        if let session,
-           let lastUsedAt,
-           now.timeIntervalSince(lastUsedAt) < Self.idleSessionLifetime
-        {
-            self.lastUsedAt = now
+        if let session {
+            if markNetworkActivity {
+                lastNetworkActivityAt = now
+            }
             return session
         }
 
-        session?.finishTasksAndInvalidate()
         let replacement = Self.makeSession()
         session = replacement
-        lastUsedAt = now
+        if markNetworkActivity {
+            lastNetworkActivityAt = now
+        }
         return replacement
+    }
+
+    private func reservePreconnectSession(now: Date = Date()) -> URLSession? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        if let lastNetworkActivityAt,
+           now.timeIntervalSince(lastNetworkActivityAt) < Self.preconnectCooldown
+        {
+            return nil
+        }
+        let activeSession: URLSession
+        if let session {
+            activeSession = session
+        } else {
+            activeSession = Self.makeSession()
+            session = activeSession
+        }
+        lastNetworkActivityAt = now
+        return activeSession
     }
 
     private func discardManagedSession(_ failedSession: URLSession) {
@@ -81,7 +182,22 @@ public final class URLSessionHTTPTransport: HTTPTransport, @unchecked Sendable {
         }
         failedSession.invalidateAndCancel()
         session = nil
-        lastUsedAt = nil
+        lastNetworkActivityAt = nil
+    }
+
+    private func markNetworkActivity(
+        for activeSession: URLSession,
+        now: Date = Date()
+    ) {
+        guard managesSessionLifecycle else {
+            return
+        }
+        stateLock.withLock {
+            guard session === activeSession else {
+                return
+            }
+            lastNetworkActivityAt = now
+        }
     }
 }
 
@@ -223,9 +339,10 @@ public struct ResponsesAPIClient: Sendable {
             "safety_identifier": safetyIdentifier,
         ]
 
-        guard JSONSerialization.isValidJSONObject(body),
-              let encoded = try? JSONSerialization.data(withJSONObject: body)
-        else {
+        let encoded: Data
+        do {
+            encoded = try JSONSerialization.data(withJSONObject: body)
+        } catch {
             throw ResponsesAPIError.invalidRequest
         }
 
@@ -233,6 +350,7 @@ public struct ResponsesAPIClient: Sendable {
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.networkServiceType = .responsiveData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = encoded

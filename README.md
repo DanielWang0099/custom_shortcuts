@@ -25,6 +25,15 @@ Native macOS keyboard shortcuts powered by your own AI model.
 
 The installer builds the release binary, registers the background LaunchAgent, and launches the app into your top menu bar.
 
+## Performance behavior
+
+AI Shortcuts keeps only its event-driven Carbon hotkeys and flags-only chord monitor resident while idle. Pressing the shared
+`Control + Option + Command` chord starts a short latency-critical wake window and preconnects to the configured
+provider with an unauthenticated `HEAD` request (no prompt, API key, or model invocation); pressing an action key
+prepares only that shortcut's UI and local dependencies. After 30 seconds without activity, unused panels, WebKit
+state, renderers, and allocator pages are trimmed; after 90 seconds, the warm network session is released too. Model
+choice, reasoning effort, image detail, and output limits are unchanged by this lifecycle.
+
 ## Setup
 
 1. **Permissions**: Grant **Accessibility** and **Screen Recording** permissions when prompted.

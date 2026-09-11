@@ -20,7 +20,14 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let menu = NSMenu()
     private let snapshot: () -> StatusMenuSnapshot
+    private lazy var readyImage = AIShortcutsLogo.menuBarImage()
+    private lazy var busyImage = NSImage(
+        systemSymbolName: "ellipsis.circle",
+        accessibilityDescription: "AI Shortcuts"
+    ) ?? readyImage
 
+    private(set) var isOpen = false
+    var onWillOpen: (() -> Void)?
     var onOpenWelcome: (() -> Void)?
     var onOpenModelSettings: (() -> Void)?
     var onReloadKey: (() -> Void)?
@@ -38,27 +45,38 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
         statusItem.button?.toolTip = "AI Shortcuts"
+        installPlaceholder()
         setBusy(false)
-        rebuildMenu()
     }
 
     func setBusy(_ busy: Bool) {
-        let image: NSImage
-        if busy {
-            image = NSImage(
-                systemSymbolName: "ellipsis.circle",
-                accessibilityDescription: "AI Shortcuts"
-            ) ?? AIShortcutsLogo.menuBarImage()
-        } else {
-            image = AIShortcutsLogo.menuBarImage()
-        }
+        let image = busy ? busyImage : readyImage
         image.isTemplate = true
         statusItem.button?.image = image
-        rebuildMenu()
+        if isOpen {
+            rebuildMenu()
+        }
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        isOpen = true
+        onWillOpen?()
         rebuildMenu()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        isOpen = false
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isOpen else {
+                return
+            }
+            self.installPlaceholder()
+        }
+    }
+
+    private func installPlaceholder() {
+        menu.removeAllItems()
+        menu.addItem(NSMenuItem(title: "AI Shortcuts", action: nil, keyEquivalent: ""))
     }
 
     private func rebuildMenu() {

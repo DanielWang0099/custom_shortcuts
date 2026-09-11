@@ -3,6 +3,7 @@ import ApplicationServices
 import AIShortcutsCore
 import AIShortcutsRendering
 import CoreGraphics
+import Darwin
 import Foundation
 import OSLog
 
@@ -14,26 +15,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     private let stateStore = AppStateStore()
     private let keychainStore = KeychainStore()
-    private let selectionService = SelectionService()
-    private let screenshotService = ScreenshotService()
-    private let finderService = FinderSelectionService()
-    private let hud = HUDController()
-    private let richTextRenderer = NativeRichTextRenderer()
     private let apiClient = AIProviderClient()
-    private let modelSettings = ModelSettingsWindowController()
-    private let explanationPanel = ExplanationPanelController()
-    private let inputLockPanel = InputLockPanelController()
-    private let insertPanel = InsertPanelController()
-    private let insertLibrary = InsertLibraryStore()
-    private let shortcutGuide = ShortcutGuideWindowController()
-    private let inputLockIndicator = InputLockIndicatorController()
-    private let clipboardQueueIndicator = ClipboardQueueIndicatorController()
 
-    private lazy var welcomeWindow = WelcomeWindowController(stateStore: stateStore)
+    // AppKit panels (especially WKWebView) dominate idle memory. Keep only
+    // lightweight state and Carbon registrations resident, then construct the
+    // exact resources an action needs on its key-down event.
+    private var selectionServiceStorage: SelectionService?
+    private var screenshotServiceStorage: ScreenshotService?
+    private var finderServiceStorage: FinderSelectionService?
+    private var hudStorage: HUDController?
+    private var richTextRendererStorage: NativeRichTextRenderer?
+    private var modelSettingsStorage: ModelSettingsWindowController?
+    private var explanationPanelStorage: ExplanationPanelController?
+    private var inputLockPanelStorage: InputLockPanelController?
+    private var insertPanelStorage: InsertPanelController?
+    private var insertLibraryStorage: InsertLibraryStore?
+    private var shortcutGuideStorage: ShortcutGuideWindowController?
+    private var inputLockIndicatorStorage: InputLockIndicatorController?
+    private var clipboardQueueIndicatorStorage: ClipboardQueueIndicatorController?
+    private var welcomeWindowStorage: WelcomeWindowController?
+    private var inputLockServiceStorage: InputLockService?
+    private var clipboardQueueServiceStorage: ClipboardQueueService?
+
     private var hotKeyManager: HotKeyManager?
     private var promptPanel: PromptPanelController?
     private var singleInstanceLock: SingleInstanceLock?
     private var apiKey: String?
+    private var cachedSafetyIdentifier = ""
     private var isBusy = false
     private var currentAction: AIShortcutAction?
     private var activeTask: Task<Void, Never>?
@@ -53,15 +61,172 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var accessibilityRequestIssuedThisRun = false
     private var screenRecordingRequestIssuedThisRun = false
     private var isUserIntentionalQuit = false
-    private lazy var inputLockService = InputLockService { [weak self] in
-        Task { @MainActor [weak self] in
-            self?.deactivateInputLock(showFeedback: true)
+    private var resourceTrimWorkItem: DispatchWorkItem?
+    private var idleSleepWorkItem: DispatchWorkItem?
+    private var latencyActivityEndWorkItem: DispatchWorkItem?
+    private var latencyActivity: NSObjectProtocol?
+    private var networkPreconnectTask: Task<Void, Never>?
+    private var preconnectGeneration = 0
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private var runtimeIsSleeping = true
+
+    private static let resourceTrimDelay: TimeInterval = 30
+    private static let runtimeIdleDelay: TimeInterval = 90
+    private static let latencyWakeDuration: TimeInterval = 4
+
+    private var selectionService: SelectionService {
+        if let selectionServiceStorage {
+            return selectionServiceStorage
         }
+        let service = SelectionService()
+        selectionServiceStorage = service
+        return service
     }
-    private lazy var clipboardQueueService = ClipboardQueueService { [weak self] event in
-        Task { @MainActor [weak self] in
-            self?.handleClipboardQueueEvent(event)
+
+    private var screenshotService: ScreenshotService {
+        if let screenshotServiceStorage {
+            return screenshotServiceStorage
         }
+        let service = ScreenshotService()
+        screenshotServiceStorage = service
+        return service
+    }
+
+    private var finderService: FinderSelectionService {
+        if let finderServiceStorage {
+            return finderServiceStorage
+        }
+        let service = FinderSelectionService()
+        finderServiceStorage = service
+        return service
+    }
+
+    private var hud: HUDController {
+        if let hudStorage {
+            return hudStorage
+        }
+        let controller = HUDController()
+        hudStorage = controller
+        return controller
+    }
+
+    private var richTextRenderer: NativeRichTextRenderer {
+        if let richTextRendererStorage {
+            return richTextRendererStorage
+        }
+        let renderer = NativeRichTextRenderer()
+        richTextRendererStorage = renderer
+        return renderer
+    }
+
+    private var modelSettings: ModelSettingsWindowController {
+        if let modelSettingsStorage {
+            return modelSettingsStorage
+        }
+        let controller = ModelSettingsWindowController()
+        modelSettingsStorage = controller
+        return controller
+    }
+
+    private var explanationPanel: ExplanationPanelController {
+        if let explanationPanelStorage {
+            return explanationPanelStorage
+        }
+        let controller = ExplanationPanelController()
+        explanationPanelStorage = controller
+        return controller
+    }
+
+    private var inputLockPanel: InputLockPanelController {
+        if let inputLockPanelStorage {
+            return inputLockPanelStorage
+        }
+        let controller = InputLockPanelController()
+        inputLockPanelStorage = controller
+        return controller
+    }
+
+    private var insertPanel: InsertPanelController {
+        if let insertPanelStorage {
+            return insertPanelStorage
+        }
+        let controller = InsertPanelController()
+        insertPanelStorage = controller
+        return controller
+    }
+
+    private var insertLibrary: InsertLibraryStore {
+        if let insertLibraryStorage {
+            return insertLibraryStorage
+        }
+        let store = InsertLibraryStore()
+        insertLibraryStorage = store
+        return store
+    }
+
+    private var shortcutGuide: ShortcutGuideWindowController {
+        if let shortcutGuideStorage {
+            return shortcutGuideStorage
+        }
+        let controller = ShortcutGuideWindowController()
+        shortcutGuideStorage = controller
+        return controller
+    }
+
+    private var inputLockIndicator: InputLockIndicatorController {
+        if let inputLockIndicatorStorage {
+            return inputLockIndicatorStorage
+        }
+        let controller = InputLockIndicatorController()
+        inputLockIndicatorStorage = controller
+        return controller
+    }
+
+    private var clipboardQueueIndicator: ClipboardQueueIndicatorController {
+        if let clipboardQueueIndicatorStorage {
+            return clipboardQueueIndicatorStorage
+        }
+        let controller = ClipboardQueueIndicatorController()
+        clipboardQueueIndicatorStorage = controller
+        return controller
+    }
+
+    private var welcomeWindow: WelcomeWindowController {
+        if let welcomeWindowStorage {
+            return welcomeWindowStorage
+        }
+        let controller = WelcomeWindowController(stateStore: stateStore)
+        controller.onOpenModelSettings = { [weak self] in
+            self?.showModelSettings()
+        }
+        welcomeWindowStorage = controller
+        return controller
+    }
+
+    private var inputLockService: InputLockService {
+        if let inputLockServiceStorage {
+            return inputLockServiceStorage
+        }
+        let service = InputLockService { [weak self] in
+            Task(priority: .userInitiated) { @MainActor [weak self] in
+                self?.deactivateInputLock(showFeedback: true)
+            }
+        }
+        inputLockServiceStorage = service
+        return service
+    }
+
+    private var clipboardQueueService: ClipboardQueueService {
+        if let clipboardQueueServiceStorage {
+            return clipboardQueueServiceStorage
+        }
+        let service = ClipboardQueueService { [weak self] event in
+            Task(priority: .userInitiated) { @MainActor [weak self] in
+                self?.handleClipboardQueueEvent(event)
+            }
+        }
+        clipboardQueueServiceStorage = service
+        return service
     }
 
     private lazy var statusMenu = StatusMenuController { [weak self] in
@@ -87,7 +252,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        NSApp.applicationIconImage = AIShortcutsLogo.appIconImage()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -98,13 +262,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         singleInstanceLock = lock
 
+        cachedSafetyIdentifier = stateStore.safetyIdentifier
         configureApplicationMenu()
         configureMenuActions()
+        configureMemoryPressureHandling()
         _ = statusMenu
 
         do {
             hotKeyManager = try HotKeyManager(
-                enabledActions: stateStore.enabledShortcutActions
+                enabledActions: stateStore.enabledShortcutActions,
+                onActivationChord: { [weak self] in
+                    self?.wakeForActivationChord()
+                },
+                onActionPressed: { [weak self] action in
+                    self?.prepareForAction(action)
+                }
             ) { [weak self] action in
                 self?.handle(action)
             }
@@ -113,7 +285,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             logger.error("Global shortcut registration failed.")
         }
 
+        preloadStoredAPIKey()
         refreshFinderAutomationAuthorization()
+        scheduleIdleSleep()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if !self.stateStore.welcomeDismissed {
@@ -124,14 +298,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        markRuntimeActivity(preconnect: false, latencyCritical: false)
         continueOnboarding()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        inputLockService.deactivate()
-        inputLockIndicator.dismiss()
-        clipboardQueueService.deactivate(notify: false)
-        clipboardQueueIndicator.dismiss()
+        resourceTrimWorkItem?.cancel()
+        idleSleepWorkItem?.cancel()
+        latencyActivityEndWorkItem?.cancel()
+        networkPreconnectTask?.cancel()
+        memoryPressureSource?.cancel()
+        apiClient.suspendConnection()
+        endLatencyActivity()
+        hotKeyManager?.invalidate()
+
+        inputLockServiceStorage?.deactivate()
+        inputLockIndicatorStorage?.dismiss()
+        clipboardQueueServiceStorage?.deactivate(notify: false)
+        clipboardQueueIndicatorStorage?.dismiss()
 
         if !isUserIntentionalQuit && (screenRecordingRequestIssuedThisRun || accessibilityRequestIssuedThisRun) {
             logger.notice("Relaunching AI Shortcuts following privacy permission update.")
@@ -158,35 +342,327 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try? process.run()
     }
 
-    private func configureMenuActions() {
-        statusMenu.onOpenWelcome = { [weak self] in
-            self?.welcomeWindow.show()
+    private func configureMemoryPressureHandling() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            self?.enterIdleMode()
         }
-        welcomeWindow.onOpenModelSettings = { [weak self] in
-            self?.showModelSettings()
+        source.resume()
+        memoryPressureSource = source
+    }
+
+    private func wakeForActivationChord() {
+        markRuntimeActivity(preconnect: true, latencyCritical: true)
+    }
+
+    private func prepareForAction(_ action: AIShortcutAction) {
+        markRuntimeActivity(
+            preconnect: action.requiresAIProvider,
+            latencyCritical: true
+        )
+
+        switch action {
+        case .ocr:
+            _ = screenshotService
+        case .refine:
+            _ = selectionService
+        case .translate, .format:
+            _ = selectionService
+            if promptPanel == nil {
+                promptPanel = PromptPanelController()
+            }
+        case .explain:
+            _ = selectionService
+            explanationPanel.prepare()
+        case .calculate:
+            _ = screenshotService
+            if promptPanel == nil {
+                promptPanel = PromptPanelController()
+            }
+        case .finderPath:
+            finderService.prepare()
+        case .inputLock:
+            _ = inputLockService
+            _ = inputLockPanel
+        case .clipboardQueue:
+            _ = clipboardQueueService
+            _ = clipboardQueueIndicator
+        case .insert:
+            _ = selectionService
+            _ = insertLibrary
+            _ = insertPanel
+        }
+    }
+
+    private func markRuntimeActivity(
+        preconnect: Bool,
+        latencyCritical: Bool
+    ) {
+        resourceTrimWorkItem?.cancel()
+        resourceTrimWorkItem = nil
+        idleSleepWorkItem?.cancel()
+        idleSleepWorkItem = nil
+        if runtimeIsSleeping {
+            runtimeIsSleeping = false
+            logger.debug("Runtime entered ready mode.")
+        }
+        if latencyCritical {
+            beginLatencyActivity()
+            scheduleLatencyActivityEnd()
+        }
+        if preconnect, apiKey != nil {
+            apiClient.prepareConnection()
+            startNetworkPreconnectionIfNeeded()
+        }
+        scheduleResourceTrim()
+        scheduleIdleSleep()
+    }
+
+    private func startNetworkPreconnectionIfNeeded() {
+        guard networkPreconnectTask == nil else {
+            return
+        }
+        let endpoint = stateStore
+            .aiProviderConfiguration(for: stateStore.aiProvider)
+            .endpoint
+        let client = apiClient
+        preconnectGeneration &+= 1
+        let generation = preconnectGeneration
+        networkPreconnectTask = Task(priority: .userInitiated) { @MainActor [weak self] in
+            await client.preconnect(to: endpoint)
+            guard !Task.isCancelled,
+                  let self,
+                  self.preconnectGeneration == generation
+            else {
+                return
+            }
+            self.networkPreconnectTask = nil
+        }
+    }
+
+    private func beginLatencyActivity() {
+        latencyActivityEndWorkItem?.cancel()
+        latencyActivityEndWorkItem = nil
+        guard latencyActivity == nil else {
+            return
+        }
+        latencyActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+            reason: "Responding to an AI Shortcuts activation"
+        )
+    }
+
+    private func scheduleLatencyActivityEnd(
+        after requestedDelay: TimeInterval? = nil
+    ) {
+        let delay = requestedDelay ?? Self.latencyWakeDuration
+        latencyActivityEndWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, !self.isBusy else {
+                return
+            }
+            self.endLatencyActivity()
+        }
+        latencyActivityEndWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func endLatencyActivity() {
+        latencyActivityEndWorkItem?.cancel()
+        latencyActivityEndWorkItem = nil
+        guard let latencyActivity else {
+            return
+        }
+        self.latencyActivity = nil
+        ProcessInfo.processInfo.endActivity(latencyActivity)
+    }
+
+    private func scheduleIdleSleep(
+        after requestedDelay: TimeInterval? = nil
+    ) {
+        let delay = requestedDelay ?? Self.runtimeIdleDelay
+        idleSleepWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.enterIdleMode()
+        }
+        idleSleepWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func scheduleResourceTrim(
+        after requestedDelay: TimeInterval? = nil
+    ) {
+        let delay = requestedDelay ?? Self.resourceTrimDelay
+        resourceTrimWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.enterStandbyMode()
+        }
+        resourceTrimWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func enterStandbyMode() {
+        resourceTrimWorkItem = nil
+        releaseDormantResources()
+        guard !hasActiveResidentFeature else {
+            scheduleResourceTrim(after: 15)
+            return
+        }
+        releaseAllocatorPages()
+        logger.debug("Runtime entered network-ready standby mode.")
+    }
+
+    private func enterIdleMode() {
+        resourceTrimWorkItem?.cancel()
+        resourceTrimWorkItem = nil
+        idleSleepWorkItem = nil
+        releaseDormantResources()
+
+        let wasSleeping = runtimeIsSleeping
+        if !requiresWarmNetworkWhileIdle {
+            suspendNetworkResidency()
+        }
+        guard !hasActiveResidentFeature else {
+            scheduleResourceTrim(after: 15)
+            scheduleIdleSleep(after: 15)
+            if !wasSleeping, runtimeIsSleeping {
+                releaseAllocatorPages()
+            }
+            return
+        }
+
+        suspendNetworkResidency()
+        releaseAllocatorPages()
+        logger.debug("Runtime entered low-memory sleep mode.")
+    }
+
+    private func suspendNetworkResidency() {
+        guard !runtimeIsSleeping else {
+            return
+        }
+        preconnectGeneration &+= 1
+        networkPreconnectTask?.cancel()
+        networkPreconnectTask = nil
+        apiClient.suspendConnection()
+        endLatencyActivity()
+        runtimeIsSleeping = true
+    }
+
+    private func releaseAllocatorPages() {
+        // Return allocator pages after the large AppKit/WebKit object graphs
+        // have been released. This runs off the main thread and only at idle.
+        DispatchQueue.global(qos: .utility).async {
+            _ = malloc_zone_pressure_relief(nil, 0)
+        }
+    }
+
+    private var hasActiveResidentFeature: Bool {
+        isBusy
+            || statusMenu.isOpen
+            || promptPanel?.isVisible == true
+            || modelSettingsStorage?.isVisible == true
+            || welcomeWindowStorage?.isVisible == true
+            || shortcutGuideStorage?.isVisible == true
+            || explanationPanelStorage?.isVisible == true
+            || insertPanelStorage?.isVisible == true
+            || inputLockPanelStorage?.isVisible == true
+            || hudStorage?.isVisible == true
+    }
+
+    private var requiresWarmNetworkWhileIdle: Bool {
+        isBusy
+            || promptPanel?.isVisible == true
+            || explanationPanelStorage?.isVisible == true
+            || insertPanelStorage?.isVisible == true
+    }
+
+    private func releaseDormantResources() {
+        if promptPanel?.isVisible != true {
+            promptPanel = nil
+        }
+        if modelSettingsStorage?.isVisible != true {
+            modelSettingsStorage = nil
+        }
+        if welcomeWindowStorage?.isVisible != true {
+            welcomeWindowStorage = nil
+        }
+        if shortcutGuideStorage?.isVisible != true {
+            shortcutGuideStorage = nil
+        }
+        if explanationPanelStorage?.isVisible != true,
+           !explanationRequestInFlight
+        {
+            explanationPanelStorage?.releaseResources()
+            explanationPanelStorage = nil
+        }
+        if insertPanelStorage?.isVisible != true {
+            insertPanelStorage = nil
+            insertLibraryStorage = nil
+        }
+        if inputLockPanelStorage?.isVisible != true {
+            inputLockPanelStorage = nil
+        }
+        if hudStorage?.isVisible != true {
+            hudStorage?.dismiss()
+            hudStorage = nil
+        }
+        if inputLockServiceStorage?.mode == nil {
+            inputLockServiceStorage = nil
+            inputLockIndicatorStorage = nil
+        }
+        if (clipboardQueueServiceStorage?.mode ?? .inactive) == .inactive {
+            clipboardQueueServiceStorage = nil
+            clipboardQueueIndicatorStorage = nil
+        }
+        if !isBusy {
+            selectionServiceStorage = nil
+            screenshotServiceStorage = nil
+            finderServiceStorage = nil
+            richTextRendererStorage = nil
+        }
+    }
+
+    private func configureMenuActions() {
+        statusMenu.onWillOpen = { [weak self] in
+            guard let self else { return }
+            self.markRuntimeActivity(preconnect: false, latencyCritical: false)
+            self.refreshFinderAutomationAuthorization()
+        }
+        statusMenu.onOpenWelcome = { [weak self] in
+            self?.markRuntimeActivity(preconnect: false, latencyCritical: true)
+            self?.welcomeWindow.show()
         }
         statusMenu.onOpenModelSettings = { [weak self] in
             self?.showModelSettings()
         }
         statusMenu.onReloadKey = { [weak self] in
+            self?.markRuntimeActivity(preconnect: false, latencyCritical: true)
             self?.loadOrImportAPIKey(showFeedback: true, forceImport: true)
         }
         statusMenu.onOpenAccessibilitySettings = { [weak self] in
+            self?.markRuntimeActivity(preconnect: false, latencyCritical: true)
             self?.requestAccessibilityPermission(openSettings: true)
         }
         statusMenu.onOpenScreenRecordingSettings = { [weak self] in
+            self?.markRuntimeActivity(preconnect: false, latencyCritical: true)
             self?.requestScreenRecordingPermission(openSettings: true)
         }
         statusMenu.onRequestFinderAutomation = { [weak self] in
+            self?.markRuntimeActivity(preconnect: false, latencyCritical: true)
             self?.requestFinderAutomationPermission()
         }
         statusMenu.onCancelOperation = { [weak self] in
             self?.cancelCurrentOperation(showFeedback: true)
         }
         statusMenu.onOpenShortcutGuide = { [weak self] in
+            self?.markRuntimeActivity(preconnect: false, latencyCritical: true)
             self?.shortcutGuide.show()
         }
         statusMenu.onToggleShortcut = { [weak self] action, enabled in
+            self?.markRuntimeActivity(preconnect: false, latencyCritical: false)
             self?.setShortcut(action, enabled: enabled)
         }
         statusMenu.onQuit = { [weak self] in
@@ -240,6 +716,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openWelcomeWindow() {
+        markRuntimeActivity(preconnect: false, latencyCritical: true)
         welcomeWindow.show()
     }
 
@@ -272,6 +749,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showModelSettings() {
+        markRuntimeActivity(preconnect: false, latencyCritical: true)
         guard !isBusy else {
             hud.showBusy()
             return
@@ -309,6 +787,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             stateStore.aiProvider = configuration.provider
             apiKeyLoadAttempted = true
             self.apiKey = selectedAPIKey
+            suspendNetworkResidency()
+            markRuntimeActivity(preconnect: true, latencyCritical: false)
             hud.showSuccess(text: "Model settings saved")
         } catch {
             self.apiKey = nil
@@ -336,6 +816,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if !apiKeyLoadAttempted {
             loadOrImportAPIKey(showFeedback: false)
+        }
+    }
+
+    private func preloadStoredAPIKey() {
+        guard !apiKeyLoadAttempted else {
+            return
+        }
+        do {
+            guard let storedKey = try keychainStore.read(for: stateStore.aiProvider) else {
+                return
+            }
+            apiKey = storedKey
+            apiKeyLoadAttempted = true
+            markRuntimeActivity(preconnect: true, latencyCritical: false)
+        } catch {
+            logger.error("The stored API key could not be preloaded.")
         }
     }
 
@@ -392,6 +888,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try keychainStore.save(entered, for: provider)
                 apiKey = entered
             }
+            suspendNetworkResidency()
+            markRuntimeActivity(preconnect: true, latencyCritical: false)
             if showFeedback {
                 hud.showSuccess(text: "API key loaded")
             }
@@ -456,6 +954,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard stateStore.enabledShortcutActions.contains(action) else {
             return
         }
+        markRuntimeActivity(
+            preconnect: action.requiresAIProvider,
+            latencyCritical: true
+        )
         if action == .insert {
             toggleInsertPanel()
             return
@@ -509,27 +1011,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         beginOperation(action)
         switch action {
         case .ocr:
-            activeTask = Task { @MainActor [weak self] in
+            activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
                 await self?.runOCR()
             }
         case .refine:
-            activeTask = Task { @MainActor [weak self] in
+            activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
                 await self?.captureAndRunTextAction(.refine)
             }
         case .translate, .format:
-            activeTask = Task { @MainActor [weak self] in
+            activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
                 await self?.captureAndRequestParameter(for: action)
             }
         case .explain:
-            activeTask = Task { @MainActor [weak self] in
+            activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
                 await self?.captureAndShowExplanation()
             }
         case .calculate:
-            activeTask = Task { @MainActor [weak self] in
+            activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
                 await self?.captureAndRequestCalculation()
             }
         case .finderPath:
-            activeTask = Task { @MainActor [weak self] in
+            activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
                 await self?.runFinderPath()
             }
         case .inputLock:
@@ -550,18 +1052,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if currentAction == action {
                     cancelCurrentOperation(showFeedback: false, message: "Shortcut disabled.")
                 }
-                if action == .inputLock, inputLockService.mode != nil {
+                if action == .inputLock, inputLockServiceStorage?.mode != nil {
                     deactivateInputLock(showFeedback: false)
                 }
-                if action == .clipboardQueue, clipboardQueueService.mode != .inactive {
-                    clipboardQueueService.deactivate(notify: false)
-                    clipboardQueueIndicator.dismiss()
+                if action == .clipboardQueue,
+                   (clipboardQueueServiceStorage?.mode ?? .inactive) != .inactive
+                {
+                    clipboardQueueServiceStorage?.deactivate(notify: false)
+                    clipboardQueueIndicatorStorage?.dismiss()
                 }
-                if action == .explain, explanationPanel.isVisible {
-                    explanationPanel.dismiss()
+                if action == .explain, explanationPanelStorage?.isVisible == true {
+                    explanationPanelStorage?.dismiss()
                 }
-                if action == .insert, insertPanel.isVisible {
-                    insertPanel.dismiss()
+                if action == .insert, insertPanelStorage?.isVisible == true {
+                    insertPanelStorage?.dismiss()
                 }
             }
 
@@ -619,7 +1123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ?? InsertEntryMatcher.uniqueContainedMatch(for: query, in: entries)
         {
             insertPanel.dismiss()
-            activeTask = Task { @MainActor [weak self] in
+            activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
                 await self?.pasteInsertion(match)
             }
             return
@@ -631,7 +1135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         insertPanel.setResolving(true)
         beginOperation(.insert)
-        activeTask = Task { @MainActor [weak self] in
+        activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
             await self?.resolveInsertionWithAI(query, entries: entries)
         }
     }
@@ -705,11 +1209,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleClipboardQueueEvent(_ event: ClipboardQueueEvent) {
         switch event {
         case let .changed(mode, count):
-            clipboardQueueIndicator.show(mode: mode, count: count)
             if mode == .inactive {
+                clipboardQueueIndicatorStorage?.dismiss()
+                markRuntimeActivity(preconnect: false, latencyCritical: false)
                 hud.showSuccess(text: "Clipboard queue complete")
+            } else {
+                clipboardQueueIndicator.show(mode: mode, count: count)
             }
         case .captureRejected:
+            markRuntimeActivity(preconnect: false, latencyCritical: true)
             hud.showError("Clipboard queue limit reached · 50 items or 100 MB")
         }
     }
@@ -734,9 +1242,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func activateInputLock(_ mode: InputLockMode) {
-        if clipboardQueueService.mode != .inactive {
-            clipboardQueueService.deactivate(notify: false)
-            clipboardQueueIndicator.dismiss()
+        if (clipboardQueueServiceStorage?.mode ?? .inactive) != .inactive {
+            clipboardQueueServiceStorage?.deactivate(notify: false)
+            clipboardQueueIndicatorStorage?.dismiss()
         }
         guard inputLockService.activate(mode) else {
             hud.showError("Input Lock could not start · check Accessibility permission")
@@ -746,11 +1254,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func deactivateInputLock(showFeedback: Bool) {
-        guard inputLockService.mode != nil else {
+        guard inputLockServiceStorage?.mode != nil else {
             return
         }
-        inputLockService.deactivate()
-        inputLockIndicator.dismiss()
+        markRuntimeActivity(preconnect: false, latencyCritical: showFeedback)
+        inputLockServiceStorage?.deactivate()
+        inputLockIndicatorStorage?.dismiss()
         ignoreInputLockHotKeyUntil = Date().addingTimeInterval(0.6)
         if showFeedback {
             hud.showSuccess(text: "Input restored")
@@ -789,7 +1298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            let panel = PromptPanelController()
+            let panel = promptPanel ?? PromptPanelController()
             promptPanel = panel
             panel.show(
                 title: "Calculate",
@@ -804,7 +1313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.finishOperation()
                     return
                 }
-                self.activeTask = Task { @MainActor [weak self] in
+                self.activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
                     await self?.runScreenshotCalculation(
                         capture: capture,
                         instruction: instruction
@@ -948,7 +1457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let panel = PromptPanelController()
+        let panel = promptPanel ?? PromptPanelController()
         promptPanel = panel
         let promptTitle: String
         let promptPlaceholder: String
@@ -976,7 +1485,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.finishOperation()
                 return
             }
-            self.activeTask = Task { @MainActor [weak self] in
+            self.activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
                 await self?.runTextAction(action, snapshot: snapshot, parameter: parameter)
             }
         }
@@ -1090,7 +1599,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         explanationPanel.setLoading(request: request, imageCount: imagePNGs.count)
 
         beginOperation(.explain)
-        activeTask = Task { @MainActor [weak self] in
+        activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
             await self?.runExplanation(
                 snapshot: snapshot,
                 request: request,
@@ -1161,7 +1670,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 prompt: prompt,
                 imagePNGs: imagePNGs,
                 apiKey: apiKey,
-                safetyIdentifier: stateStore.safetyIdentifier,
+                safetyIdentifier: cachedSafetyIdentifier,
                 configuration: configuration
             )
             lastAPIStatus = "Success"
@@ -1202,6 +1711,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func beginOperation(_ action: AIShortcutAction) {
+        resourceTrimWorkItem?.cancel()
+        resourceTrimWorkItem = nil
+        idleSleepWorkItem?.cancel()
+        idleSleepWorkItem = nil
+        beginLatencyActivity()
         operationGeneration &+= 1
         let generation = operationGeneration
         isBusy = true
@@ -1234,6 +1748,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         currentAction = nil
         isBusy = false
         statusMenu.setBusy(false)
+        scheduleLatencyActivityEnd(after: 0.5)
+        scheduleResourceTrim()
+        scheduleIdleSleep()
     }
 
     private func cancelCurrentOperation(
@@ -1248,7 +1765,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let task = activeTask
         activeTask = nil
         task?.cancel()
-        screenshotService.cancelCapture()
+        screenshotServiceStorage?.cancelCapture()
 
         let panel = promptPanel
         promptPanel = nil
@@ -1276,13 +1793,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if showFeedback {
             hud.showSuccess(text: "Cancelled")
         }
-    }
-
-    private static func pixelSize(ofPNG data: Data) -> (width: Int, height: Int)? {
-        guard let representation = NSBitmapImageRep(data: data) else {
-            return nil
-        }
-        return (representation.pixelsWide, representation.pixelsHigh)
     }
 
     private static func explanationDisplayRequest(_ request: String, imageCount: Int) -> String {

@@ -37,10 +37,36 @@ enum FinderPathError: LocalizedError {
 
 @MainActor
 final class FinderSelectionService {
+    private static let selectionScriptSource = """
+    on getFinderPaths()
+        tell application "Finder"
+            if not running then return {"notRunning", ""}
+            set selectedItems to selection
+            if (count of selectedItems) > 0 then
+                set out to ""
+                repeat with f in selectedItems
+                    try
+                        set out to out & POSIX path of (f as alias) & linefeed
+                    end try
+                end repeat
+                return {"selection", out}
+            end if
+            return {"empty", ""}
+        end tell
+    end getFinderPaths
+
+    getFinderPaths()
+    """
+
     private let logger = Logger(
         subsystem: AppConfiguration.bundleIdentifier,
         category: "finder"
     )
+    private lazy var selectionScript = NSAppleScript(source: Self.selectionScriptSource)
+
+    func prepare() {
+        _ = selectionScript
+    }
 
     func authorizationState(
         requestIfNeeded: Bool
@@ -75,28 +101,7 @@ final class FinderSelectionService {
         // Returns an AppleEvent list of two items: a source label and the
         // newline-joined full POSIX paths. A missing selection returns
         // "empty" instead of silently substituting the front-window folder.
-        let script = """
-        on getFinderPaths()
-            tell application "Finder"
-                if not running then return {"notRunning", ""}
-                set selectedItems to selection
-                if (count of selectedItems) > 0 then
-                    set out to ""
-                    repeat with f in selectedItems
-                        try
-                            set out to out & POSIX path of (f as alias) & linefeed
-                        end try
-                    end repeat
-                    return {"selection", out}
-                end if
-                return {"empty", ""}
-            end tell
-        end getFinderPaths
-
-        getFinderPaths()
-        """
-
-        guard let appleScript = NSAppleScript(source: script) else {
+        guard let appleScript = selectionScript else {
             throw FinderPathError.appleScriptFailed("Could not compile the AppleScript source.")
         }
         var errorInfo: NSDictionary?

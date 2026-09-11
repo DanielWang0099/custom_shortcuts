@@ -42,6 +42,7 @@ struct CoreChecks {
         failures += await run("Insert matching and privacy", insertMatchingChecks)
         failures += await run("Responses request contract", requestContractCheck)
         failures += await run("configurable provider requests", configurableProviderRequestCheck)
+        failures += await run("transport residency lifecycle", transportLifecycleCheck)
         failures += await run("mocked Responses success", mockedSuccessCheck)
         failures += await run("mocked Responses errors", mockedErrorChecks)
 
@@ -811,6 +812,49 @@ struct CoreChecks {
                 && ClipboardQueueCapturePolicy.maximumCaptureAttempts >= 100,
             "Clipboard capture did not allow enough time for a window switch and delayed copy."
         )
+        try expect(
+            ClipboardQueuePastePolicy.advanceDelay >= 0.2,
+            "Clipboard payloads are not held long enough for asynchronous paste consumers."
+        )
+
+        let expected = ["quick", "cleanup,", "since", "this"]
+        var captured: [String] = []
+        var tracker = ClipboardQueueCaptureTracker(initialChangeCount: 40)
+        var changeCount = 40
+        for word in expected {
+            tracker.synchronizeIfIdle(to: changeCount)
+            tracker.registerCopyPress()
+            changeCount += 1
+            guard tracker.canConsume(changeCount: changeCount),
+                  tracker.consume(changeCount: changeCount)
+            else {
+                throw CheckFailure(description: "A sequential clipboard change was not captured.")
+            }
+            captured.append(word)
+        }
+        try expect(
+            captured == expected && !tracker.hasPendingCopies,
+            "Sequential clipboard changes were duplicated, reordered, or left pending."
+        )
+
+        // Several delayed observers previously consumed the same final state,
+        // producing results such as `quick this this this`. One change count
+        // must now satisfy at most one physical Copy press.
+        var delayed = ClipboardQueueCaptureTracker(initialChangeCount: 100)
+        for _ in expected {
+            delayed.registerCopyPress()
+        }
+        try expect(
+            delayed.consume(changeCount: 104)
+                && !delayed.consume(changeCount: 104)
+                && delayed.pendingCopyCount == 3,
+            "One clipboard update was incorrectly consumed by multiple Copy presses."
+        )
+        delayed.discardPendingCopies(observedChangeCount: 104)
+        try expect(
+            !delayed.hasPendingCopies,
+            "Expired clipboard presses were not discarded."
+        )
     }
 
     private static func sequentialClipboardSinglePressChecks() async throws {
@@ -1282,6 +1326,24 @@ struct CoreChecks {
         )
     }
 
+    private static func transportLifecycleCheck() async throws {
+        let transport = LifecycleTransport()
+        let client = AIProviderClient(transport: transport)
+        let endpoint = URL(string: "https://example.com/v1/chat/completions")!
+
+        client.prepareConnection()
+        await client.preconnect(to: endpoint)
+        client.suspendConnection()
+
+        let snapshot = transport.snapshot
+        try expect(
+            snapshot.prepareCount == 1
+                && snapshot.preconnectEndpoints == [endpoint]
+                && snapshot.suspendCount == 1,
+            "The provider client did not forward prepare, preconnect, and suspend lifecycle events."
+        )
+    }
+
     private static func mockedErrorChecks() async throws {
         try expect(
             NetworkRetryPolicy.shouldRetry(URLError(.networkConnectionLost))
@@ -1404,5 +1466,50 @@ private struct MockTransport: HTTPTransport {
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         try await handler(request)
+    }
+}
+
+private final class LifecycleTransport: HTTPTransport, @unchecked Sendable {
+    struct Snapshot {
+        let prepareCount: Int
+        let preconnectEndpoints: [URL]
+        let suspendCount: Int
+    }
+
+    private let lock = NSLock()
+    private var prepareCount = 0
+    private var preconnectEndpoints: [URL] = []
+    private var suspendCount = 0
+
+    var snapshot: Snapshot {
+        lock.withLock {
+            Snapshot(
+                prepareCount: prepareCount,
+                preconnectEndpoints: preconnectEndpoints,
+                suspendCount: suspendCount
+            )
+        }
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        throw URLError(.unsupportedURL)
+    }
+
+    func prepare() {
+        lock.withLock {
+            prepareCount += 1
+        }
+    }
+
+    func preconnect(to endpoint: URL) async {
+        lock.withLock {
+            preconnectEndpoints.append(endpoint)
+        }
+    }
+
+    func suspend() {
+        lock.withLock {
+            suspendCount += 1
+        }
     }
 }

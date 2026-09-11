@@ -34,6 +34,8 @@ final class WelcomeWindowController: NSObject, NSWindowDelegate {
     private let stateStore: AppStateStore
     var onOpenModelSettings: (() -> Void)?
 
+    var isVisible: Bool { panel.isVisible }
+
     init(stateStore: AppStateStore) {
         self.stateStore = stateStore
         panel = WelcomePanel(

@@ -7,6 +7,18 @@ public struct AIProviderClient: Sendable {
         self.transport = transport
     }
 
+    public func prepareConnection() {
+        transport.prepare()
+    }
+
+    public func preconnect(to endpoint: URL) async {
+        await transport.preconnect(to: endpoint)
+    }
+
+    public func suspendConnection() {
+        transport.suspend()
+    }
+
     public func makeRequest(
         prompt: PromptSpec,
         imagePNGs: [Data] = [],
@@ -34,9 +46,10 @@ public struct AIProviderClient: Sendable {
             )
         }
 
-        guard JSONSerialization.isValidJSONObject(body),
-              let encoded = try? JSONSerialization.data(withJSONObject: body)
-        else {
+        let encoded: Data
+        do {
+            encoded = try JSONSerialization.data(withJSONObject: body)
+        } catch {
             throw ResponsesAPIError.invalidRequest
         }
 
@@ -44,6 +57,7 @@ public struct AIProviderClient: Sendable {
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.networkServiceType = .responsiveData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         switch configuration.provider {
         case .openAICompatible:

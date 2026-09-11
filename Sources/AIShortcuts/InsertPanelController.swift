@@ -834,11 +834,6 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
         arrowImageView.imageScaling = .scaleProportionallyDown
         arrowImageView.setAccessibilityLabel("Maps key to value")
 
-        actionButton.isBordered = false
-        actionButton.focusRingType = .none
-        actionButton.font = .systemFont(ofSize: 11.5, weight: .semibold)
-        actionButton.imagePosition = .imageLeading
-        actionButton.imageScaling = .scaleProportionallyDown
         if isBuiltIn {
             actionButton.target = nil
             actionButton.action = nil
@@ -846,8 +841,6 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
             actionButton.target = self
             actionButton.action = #selector(performAction)
         }
-        actionButton.wantsLayer = true
-        actionButton.layer?.cornerRadius = 9
         refreshActionAppearance()
 
         keySurface.addSubview(keyField)
@@ -886,11 +879,7 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
     }
 
     private var fittedActionWidth: CGFloat {
-        let titleWidth = ceil((actionButton.title as NSString).size(
-            withAttributes: [.font: actionButton.font ?? NSFont.systemFont(ofSize: 11.5, weight: .semibold)]
-        ).width)
-        let imageWidth: CGFloat = actionButton.image == nil ? 0 : 16
-        return max(68, titleWidth + imageWidth + 22)
+        actionButton.fittingWidth
     }
 
     private func refreshActionAppearance() {
@@ -954,20 +943,16 @@ private final class InsertEntryRowView: NSView, NSTextFieldDelegate {
             isEnabled = false
         }
 
-        actionButton.title = title
-        actionButton.image = NSImage(
-            systemSymbolName: symbol,
-            accessibilityDescription: title
-        )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold)
+        actionButton.setContent(
+            title: title,
+            symbol: symbol,
+            tint: tint,
+            background: background,
+            hoveredBackground: hoveredBackground,
+            border: border,
+            isEnabled: isEnabled,
+            alpha: isEnabled || isBuiltIn ? 1 : 0.40
         )
-        actionButton.contentTintColor = tint
-        actionButton.setBackgroundColors(normal: background, hovered: hoveredBackground)
-        actionButton.layer?.borderWidth = 1
-        actionButton.layer?.borderColor = border.cgColor
-        actionButton.setAccessibilityLabel("\(title) insertion")
-        actionButton.isEnabled = isEnabled
-        actionButton.alphaValue = isEnabled || isBuiltIn ? 1 : 0.40
         needsLayout = true
     }
 
@@ -1176,15 +1161,120 @@ private final class VerticallyCenteredTextFieldCell: NSTextFieldCell {
 }
 
 private final class InsertActionButton: NSButton {
+    private let iconImageView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
     private var trackingArea: NSTrackingArea?
     private var isHovered = false
     private var normalBackgroundColor = NSColor.clear
     private var hoveredBackgroundColor = NSColor.clear
 
-    func setBackgroundColors(normal: NSColor, hovered: NSColor) {
-        normalBackgroundColor = normal
-        hoveredBackgroundColor = hovered
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isBordered = false
+        focusRingType = .none
+        title = ""
+        image = nil
+        imagePosition = .noImage
+
+        titleLabel.isEditable = false
+        titleLabel.isSelectable = false
+        titleLabel.isBezeled = false
+        titleLabel.drawsBackground = false
+        titleLabel.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        titleLabel.lineBreakMode = .byClipping
+
+        iconImageView.imageScaling = .scaleProportionallyDown
+
+        addSubview(iconImageView)
+        addSubview(titleLabel)
+
+        wantsLayer = true
+        layer?.cornerRadius = 9
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func setContent(
+        title: String,
+        symbol: String,
+        tint: NSColor,
+        background: NSColor,
+        hoveredBackground: NSColor,
+        border: NSColor,
+        isEnabled: Bool,
+        alpha: CGFloat
+    ) {
+        self.title = ""
+        self.image = nil
+        titleLabel.stringValue = title
+        titleLabel.textColor = tint
+
+        iconImageView.image = NSImage(
+            systemSymbolName: symbol,
+            accessibilityDescription: title
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+        )
+        iconImageView.contentTintColor = tint
+
+        normalBackgroundColor = background
+        hoveredBackgroundColor = hoveredBackground
         updateBackground()
+
+        layer?.borderWidth = 1
+        layer?.borderColor = border.cgColor
+        self.isEnabled = isEnabled
+        alphaValue = alpha
+        setAccessibilityLabel("\(title) insertion")
+        setAccessibilityTitle(title)
+        needsLayout = true
+    }
+
+    var fittingWidth: CGFloat {
+        let titleSize = titleLabel.intrinsicContentSize
+        let iconWidth: CGFloat = iconImageView.image == nil ? 0 : 13
+        let spacing: CGFloat = iconImageView.image == nil ? 0 : 6
+        let padding: CGFloat = 22 // 11pt inset on each side
+        return max(70, ceil(titleSize.width) + iconWidth + spacing + padding)
+    }
+
+    override func layout() {
+        super.layout()
+        let hasImage = iconImageView.image != nil
+        let iconSize: CGFloat = hasImage ? 13 : 0
+        let spacing: CGFloat = hasImage ? 6 : 0
+        let titleSize = titleLabel.intrinsicContentSize
+        let totalContentWidth = iconSize + (hasImage ? spacing : 0) + ceil(titleSize.width)
+        let startX = max(10, floor((bounds.width - totalContentWidth) / 2))
+
+        if hasImage {
+            iconImageView.frame = NSRect(
+                x: startX,
+                y: floor((bounds.height - iconSize) / 2),
+                width: iconSize,
+                height: iconSize
+            )
+            titleLabel.frame = NSRect(
+                x: startX + iconSize + spacing,
+                y: floor((bounds.height - titleSize.height) / 2),
+                width: bounds.width - startX - iconSize - spacing - 8,
+                height: ceil(titleSize.height)
+            )
+        } else {
+            titleLabel.frame = NSRect(
+                x: startX,
+                y: floor((bounds.height - titleSize.height) / 2),
+                width: bounds.width - (startX * 2),
+                height: ceil(titleSize.height)
+            )
+        }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard bounds.contains(point) else { return nil }
+        return isEnabled && target != nil ? self : nil
     }
 
     override func updateTrackingAreas() {

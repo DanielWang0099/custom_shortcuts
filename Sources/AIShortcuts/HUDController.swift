@@ -32,6 +32,17 @@ final class HUDController {
     private var dismissOnMouseExit = false
     private var mouseExitPoller: DispatchSourceTimer?
 
+    var isVisible: Bool {
+        panel?.isVisible ?? false
+    }
+
+    func dismiss() {
+        generation &+= 1
+        stopMouseExitDismissal()
+        panel?.orderOut(nil)
+        panel = nil
+    }
+
     func showSuccess(text: String? = nil) {
         show(
             symbolName: "checkmark",
@@ -291,5 +302,9 @@ final class HUDController {
         mouseExitPoller?.cancel()
         mouseExitPoller = nil
         dismissOnMouseExit = false
+    }
+
+    deinit {
+        mouseExitPoller?.cancel()
     }
 }

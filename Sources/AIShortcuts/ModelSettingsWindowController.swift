@@ -12,28 +12,20 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
     private let panel: ModelSettingsPanel
     private let root = NSView()
     private let titleLabel = NSTextField(labelWithString: "Model settings")
-    private let subtitleLabel = NSTextField(
-        labelWithString: "Choose the request style, endpoint, model, and key. Shortcuts stay app-controlled."
-    )
     private let closeButton = ModelSettingsCloseButton()
     private let providerLabel = NSTextField(labelWithString: "Request style")
     private let providerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let providerDetailLabel = NSTextField(labelWithString: "")
-    private let connectionSectionLabel = NSTextField(labelWithString: "CONNECTION")
-    private let connectionDivider = NSView()
-    private let endpointLabel = NSTextField(labelWithString: "Endpoint URL")
+    private let endpointLabel = NSTextField(labelWithString: "Endpoint")
     private let endpointField = ModelSettingsTextField()
     private lazy var endpointContainer = ModelSettingsFieldView(textField: endpointField)
-    private let modelLabel = NSTextField(labelWithString: "Model ID")
+    private let modelLabel = NSTextField(labelWithString: "Model")
     private let modelField = ModelSettingsTextField()
     private lazy var modelContainer = ModelSettingsFieldView(textField: modelField)
-    private let credentialSectionLabel = NSTextField(labelWithString: "CREDENTIAL")
-    private let credentialDivider = NSView()
     private let apiKeyLabel = NSTextField(labelWithString: "API key")
     private let apiKeyField = ModelSettingsSecureTextField()
     private lazy var apiKeyContainer = ModelSettingsFieldView(textField: apiKeyField)
     private let helperLabel = NSTextField(
-        labelWithString: "Securely stored in your macOS login Keychain · leave blank to keep the saved key."
+        labelWithString: "Stored securely in macOS Keychain · leave blank to keep the saved key."
     )
     private let helperIcon = NSImageView()
     private let validationLabel = NSTextField(labelWithString: "")
@@ -44,9 +36,11 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
     private var selectedProvider: AIProvider = .openAICompatible
     private var onSave: ((AIProviderConfiguration, String?) -> Void)?
 
+    var isVisible: Bool { panel.isVisible }
+
     override init() {
         panel = ModelSettingsPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 440),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -124,19 +118,13 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
         configureKeyViewLoop()
 
         root.addSubview(titleLabel)
-        root.addSubview(subtitleLabel)
         root.addSubview(closeButton)
         root.addSubview(providerLabel)
         root.addSubview(providerPopup)
-        root.addSubview(providerDetailLabel)
-        root.addSubview(connectionSectionLabel)
-        root.addSubview(connectionDivider)
         root.addSubview(endpointLabel)
         root.addSubview(endpointContainer)
         root.addSubview(modelLabel)
         root.addSubview(modelContainer)
-        root.addSubview(credentialSectionLabel)
-        root.addSubview(credentialDivider)
         root.addSubview(apiKeyLabel)
         root.addSubview(apiKeyContainer)
         root.addSubview(helperIcon)
@@ -149,13 +137,9 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
     private func configureHeader() {
         titleLabel.font = .systemFont(ofSize: 21, weight: .bold)
         titleLabel.textColor = ShortcutUIStyle.primaryTextColor
-        titleLabel.frame = NSRect(x: 32, y: 466, width: 360, height: 26)
+        titleLabel.frame = NSRect(x: 32, y: 386, width: 360, height: 26)
 
-        subtitleLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
-        subtitleLabel.textColor = ShortcutUIStyle.secondaryTextColor
-        subtitleLabel.frame = NSRect(x: 32, y: 440, width: 540, height: 18)
-
-        closeButton.frame = NSRect(x: 580, y: 464, width: 28, height: 28)
+        closeButton.frame = NSRect(x: 580, y: 384, width: 28, height: 28)
         closeButton.target = self
         closeButton.action = #selector(cancel)
         closeButton.toolTip = "Close"
@@ -163,12 +147,12 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
     }
 
     private func configureProvider() {
-        providerLabel.frame = NSRect(x: 32, y: 404, width: 260, height: 16)
+        providerLabel.frame = NSRect(x: 32, y: 342, width: 260, height: 16)
         configureLabel(providerLabel, color: ShortcutUIStyle.primaryTextColor, size: 12.5)
 
         providerPopup.addItems(withTitles: AIProvider.allCases.map(\.displayName))
         providerPopup.font = .systemFont(ofSize: 13.5, weight: .semibold)
-        providerPopup.frame = NSRect(x: 32, y: 360, width: 260, height: 36)
+        providerPopup.frame = NSRect(x: 32, y: 298, width: 576, height: 36)
         providerPopup.appearance = NSAppearance(named: .darkAqua)
         providerPopup.contentTintColor = ShortcutUIStyle.primaryTextColor
         providerPopup.focusRingType = .none
@@ -181,21 +165,12 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
         providerPopup.action = #selector(providerChanged)
         providerPopup.setAccessibilityLabel("Request style")
         providerPopup.setAccessibilityHelp("Choose OpenAI-compatible Chat Completions or Anthropic Messages.")
-
-        providerDetailLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        providerDetailLabel.textColor = ShortcutUIStyle.accentColor.withAlphaComponent(0.92)
-        providerDetailLabel.frame = NSRect(x: 304, y: 369, width: 304, height: 18)
-        providerDetailLabel.setAccessibilityLabel("Request protocol")
     }
 
     private func configureTextFields() {
-        configureSectionLabel(connectionSectionLabel)
-        configureDivider(connectionDivider)
-        layoutSectionHeader(label: connectionSectionLabel, divider: connectionDivider, y: 326)
-
-        endpointLabel.frame = NSRect(x: 32, y: 296, width: 200, height: 16)
+        endpointLabel.frame = NSRect(x: 32, y: 266, width: 200, height: 16)
         configureLabel(endpointLabel, color: ShortcutUIStyle.secondaryTextColor)
-        endpointContainer.frame = NSRect(x: 32, y: 254, width: 576, height: 36)
+        endpointContainer.frame = NSRect(x: 32, y: 224, width: 576, height: 36)
         configureField(
             endpointField,
             placeholder: AIProvider.openAICompatible.endpointPlaceholder,
@@ -204,9 +179,9 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
         )
         endpointField.delegate = self
 
-        modelLabel.frame = NSRect(x: 32, y: 224, width: 200, height: 16)
+        modelLabel.frame = NSRect(x: 32, y: 194, width: 200, height: 16)
         configureLabel(modelLabel, color: ShortcutUIStyle.secondaryTextColor)
-        modelContainer.frame = NSRect(x: 32, y: 182, width: 576, height: 36)
+        modelContainer.frame = NSRect(x: 32, y: 152, width: 576, height: 36)
         configureField(
             modelField,
             placeholder: AIProvider.openAICompatible.defaultModel,
@@ -215,13 +190,9 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
         )
         modelField.delegate = self
 
-        configureSectionLabel(credentialSectionLabel)
-        configureDivider(credentialDivider)
-        layoutSectionHeader(label: credentialSectionLabel, divider: credentialDivider, y: 148)
-
-        apiKeyLabel.frame = NSRect(x: 32, y: 118, width: 200, height: 16)
+        apiKeyLabel.frame = NSRect(x: 32, y: 122, width: 200, height: 16)
         configureLabel(apiKeyLabel, color: ShortcutUIStyle.secondaryTextColor)
-        apiKeyContainer.frame = NSRect(x: 32, y: 76, width: 576, height: 36)
+        apiKeyContainer.frame = NSRect(x: 32, y: 80, width: 576, height: 36)
         configureField(
             apiKeyField,
             placeholder: "Paste a new API key",
@@ -238,12 +209,12 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
         )
         helperIcon.contentTintColor = ShortcutUIStyle.successAccentColor.withAlphaComponent(0.90)
         helperIcon.imageScaling = .scaleProportionallyDown
-        helperIcon.frame = NSRect(x: 32, y: 52, width: 14, height: 14)
+        helperIcon.frame = NSRect(x: 32, y: 56, width: 14, height: 14)
         helperIcon.setAccessibilityLabel("Secure Keychain storage")
 
         helperLabel.font = .systemFont(ofSize: 11.5, weight: .regular)
         helperLabel.textColor = ShortcutUIStyle.secondaryTextColor
-        helperLabel.frame = NSRect(x: 52, y: 50, width: 556, height: 18)
+        helperLabel.frame = NSRect(x: 52, y: 54, width: 556, height: 18)
     }
 
     private func configureButtons() {
@@ -294,15 +265,6 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
         providerPopup.nextKeyView = endpointField
     }
 
-    private func layoutSectionHeader(label: NSTextField, divider: NSView, y: CGFloat) {
-        label.sizeToFit()
-        let labelWidth = ceil(label.frame.width)
-        label.frame = NSRect(x: 32, y: y, width: labelWidth, height: 16)
-        let dividerX = 32 + labelWidth + 12
-        let dividerWidth = max(0, 608 - dividerX)
-        divider.frame = NSRect(x: dividerX, y: y + 7, width: dividerWidth, height: 1)
-    }
-
     private func configureLabel(
         _ label: NSTextField,
         color: NSColor,
@@ -310,17 +272,6 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
     ) {
         label.font = .systemFont(ofSize: size, weight: .semibold)
         label.textColor = color
-    }
-
-    private func configureSectionLabel(_ label: NSTextField) {
-        label.font = .systemFont(ofSize: 10.5, weight: .semibold)
-        label.textColor = ShortcutUIStyle.secondaryTextColor.withAlphaComponent(0.82)
-    }
-
-    private func configureDivider(_ divider: NSView) {
-        divider.wantsLayer = true
-        divider.layer?.backgroundColor = ShortcutUIStyle.contentBorderColor.cgColor
-        divider.setAccessibilityHidden(true)
     }
 
     private func configureButton(
@@ -382,7 +333,6 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
         apiKeyField.stringValue = draft.apiKey
         setPlaceholder(endpointField, provider.endpointPlaceholder)
         setPlaceholder(modelField, provider.defaultModel)
-        providerDetailLabel.stringValue = provider.requestDescription
         validationLabel.stringValue = ""
         validationLabel.isHidden = true
     }

@@ -3,8 +3,6 @@ import Foundation
 
 struct ScreenshotCapture: Sendable {
     let pngData: Data
-    let pixelWidth: Int
-    let pixelHeight: Int
 }
 
 enum ScreenshotError: LocalizedError {
@@ -51,30 +49,23 @@ final class ScreenshotService {
             return nil
         }
 
-        let sourceData =
-            pasteboard.data(forType: .png)
-            ?? pasteboard.data(forType: .tiff)
-        guard let sourceData else {
+        if let pngData = pasteboard.data(forType: .png) {
+            // `screencapture` already produced the upload format. Returning it
+            // directly avoids a full-resolution bitmap decode and re-encode.
+            return ScreenshotCapture(pngData: pngData)
+        }
+
+        guard let sourceData = pasteboard.data(forType: .tiff) else {
             throw ScreenshotError.missingImage
         }
         guard let bitmap = NSBitmapImageRep(data: sourceData) else {
             throw ScreenshotError.conversionFailed
         }
-        let pngData: Data
-        if pasteboard.data(forType: .png) != nil {
-            pngData = sourceData
-        } else {
-            guard let converted = bitmap.representation(using: .png, properties: [:]) else {
-                throw ScreenshotError.conversionFailed
-            }
-            pngData = converted
+        guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
+            throw ScreenshotError.conversionFailed
         }
 
-        return ScreenshotCapture(
-            pngData: pngData,
-            pixelWidth: bitmap.pixelsWide,
-            pixelHeight: bitmap.pixelsHigh
-        )
+        return ScreenshotCapture(pngData: pngData)
     }
 
     private func runScreenshotProcess() async throws -> Int32 {
@@ -85,7 +76,7 @@ final class ScreenshotService {
             activeProcess = process
             process.terminationHandler = { [weak self] completed in
                 let status = completed.terminationStatus
-                Task { @MainActor in
+                Task(priority: .userInitiated) { @MainActor in
                     if self?.activeProcess === completed {
                         self?.activeProcess = nil
                     }

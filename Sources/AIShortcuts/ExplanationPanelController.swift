@@ -36,6 +36,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
     private var latestUserAnchor: String?
     private var latestAssistantAnchor: String?
     private var statusAnchor: String?
+    private var hasPreparedWebView = false
 
     private static let maximumPastedImages = 4
 
@@ -52,6 +53,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         )
         let webConfiguration = WKWebViewConfiguration()
         webConfiguration.defaultWebpagePreferences.allowsContentJavaScript = true
+        webConfiguration.websiteDataStore = .nonPersistent()
         transcriptView = WKWebView(frame: .zero, configuration: webConfiguration)
         promptView = PasteAwareTextView()
         promptScrollView = NSScrollView()
@@ -86,6 +88,17 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         updateComposerLayout()
     }
 
+    func prepare() {
+        guard !hasPreparedWebView else {
+            return
+        }
+        hasPreparedWebView = true
+        transcriptView.loadHTMLString(
+            webTextRenderer.htmlDocument(body: #"<main class="transcript"></main>"#),
+            baseURL: webTextRenderer.resourceBaseURL
+        )
+    }
+
     func show(
         exchanges: [ExplanationExchange],
         hasHiddenSelection: Bool,
@@ -93,6 +106,7 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
         pendingRequest: String? = nil,
         onSubmit: @escaping (String, [Data]) -> Void
     ) {
+        hasPreparedWebView = true
         self.exchanges = exchanges
         self.hasHiddenSelection = hasHiddenSelection
         self.isLoading = isLoading
@@ -188,6 +202,12 @@ final class ExplanationPanelController: NSObject, NSWindowDelegate, NSTextViewDe
 
     func dismiss() {
         panel.orderOut(nil)
+    }
+
+    func releaseResources() {
+        panel.orderOut(nil)
+        transcriptView.stopLoading()
+        transcriptView.navigationDelegate = nil
     }
 
     func windowDidResignKey(_ notification: Notification) {
