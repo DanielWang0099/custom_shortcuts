@@ -29,6 +29,7 @@ struct CoreChecks {
 
         failures += await run("key source parsing", keySourceParsing)
         failures += await run("AI output contracts", outputContractChecks)
+        failures += await run("Markdown math escape repair", markdownMathEscapeRepairChecks)
         failures += await run("math syntax contracts", mathSyntaxChecks)
         failures += await run("structured AI output parsing", structuredOutputChecks)
         failures += await run("prompt and replacement policies", promptAndPolicyChecks)
@@ -42,6 +43,11 @@ struct CoreChecks {
         failures += await run("Insert matching and privacy", insertMatchingChecks)
         failures += await run("Responses request contract", requestContractCheck)
         failures += await run("configurable provider requests", configurableProviderRequestCheck)
+        failures += await run(
+            "provider rejects empty fallback documents",
+            emptyProviderFallbackCheck
+        )
+        failures += await run("bounded subprocess output", boundedSubprocessOutputCheck)
         failures += await run("transport residency lifecycle", transportLifecycleCheck)
         failures += await run("mocked Responses success", mockedSuccessCheck)
         failures += await run("mocked Responses errors", mockedErrorChecks)
@@ -170,6 +176,7 @@ struct CoreChecks {
         let calculated = PromptBuilder.make(action: .calculate)
         try expect(
             explain.instructions.contains("Use format markdown whenever")
+                && explain.instructions.contains("After JSON decoding")
                 && calculated.instructions.contains("only when no formatting or math delimiters are needed"),
             "Explain and Calculate did not require Markdown for formatted or mathematical answers."
         )
@@ -185,6 +192,19 @@ struct CoreChecks {
                 && spans[1].source == "$$\\sqrt{x}$$"
                 && spans[1].isDisplay,
             "Math scanning interpreted currency or code content as equations."
+        )
+        let overEscaped = #"For layer \\(l\\):"#
+        try expect(
+            MathSyntax.mathSpans(in: overEscaped).isEmpty
+                && !MathSyntax.hasUnclosedMathDelimiter(in: overEscaped),
+            "A doubled backslash was incorrectly treated as a math opener."
+        )
+        let rowBreak = #"\[\begin{matrix}a \\[3pt] b \\] c\end{matrix}\]"#
+        let rowBreakSpans = MathSyntax.mathSpans(in: rowBreak)
+        try expect(
+            rowBreakSpans.count == 1
+                && rowBreakSpans.first?.source == rowBreak,
+            "An escaped row break was incorrectly treated as the display-math closer."
         )
         try expect(
             MathSyntax.hasUnclosedMathDelimiter(in: "Broken \\(x^2")
@@ -242,6 +262,60 @@ struct CoreChecks {
         } catch AIOutputValidationError.unsafeLink {
             // Expected.
         }
+    }
+
+    private static func markdownMathEscapeRepairChecks() async throws {
+        let providerOutput = #"""
+        Backpropagation uses the chain rule. For layer \\(l\\):
+
+        - \\(z^{[l]} = W^{[l]}a^{[l-1]} + b^{[l]}\\)
+        - \\(\frac{1}{2}mv^2\\)
+        - Output error: \\(
+        \delta^{[L]} = \frac{\partial \mathcal{L}}{\partial a^{[L]}} \odot f'^{[L]}(z^{[L]})
+        \\)
+
+        Keep `\\(literal\\)` unchanged.
+        ```text
+        \\(also literal\\)
+        ```
+        """#
+        let repaired = AIOutputDocumentSanitizer.unwrapOrSanitize(
+            AIOutputDocument(format: .markdown, source: providerOutput)
+        )
+        let expected = #"""
+        Backpropagation uses the chain rule. For layer \(l\):
+
+        - \(z^{[l]} = W^{[l]}a^{[l-1]} + b^{[l]}\)
+        - \(\frac{1}{2}mv^2\)
+        - Output error: \[
+        \delta^{[L]} = \frac{\partial \mathcal{L}}{\partial a^{[L]}} \odot f'^{[L]}(z^{[L]})
+        \]
+
+        Keep `\\(literal\\)` unchanged.
+        ```text
+        \\(also literal\\)
+        ```
+        """#
+        try expect(
+            repaired.source == expected,
+            "Explain Markdown retained an extra escaping layer around LaTeX math."
+        )
+
+        let valid = #"Inline \(x + y\), display \[z^2\], and row break \ remain unchanged."#
+        try expect(
+            AIOutputDocumentSanitizer.unwrapOrSanitize(
+                AIOutputDocument(format: .markdown, source: valid)
+            ).source == valid,
+            "Valid Markdown math was modified while repairing escaped delimiters."
+        )
+
+        let matrixSpacing = #"\[\begin{matrix}a \\[3pt] b \\] c\end{matrix}\]"#
+        try expect(
+            AIOutputDocumentSanitizer.unwrapOrSanitize(
+                AIOutputDocument(format: .markdown, source: matrixSpacing)
+            ).source == matrixSpacing,
+            "Valid LaTeX row breaks inside canonical math were mistaken for escaped delimiters."
+        )
     }
 
     private static func structuredOutputChecks() async throws {
@@ -389,6 +463,36 @@ struct CoreChecks {
                 source: "**Photosynthesis** converts light into chemical energy."
             ),
             "Explain AI output was not parsed under explanationResponse contract."
+        )
+
+        let overEscapedExplanation = #"For layer \\(l\\): \\\\frac is literal code, but \\(x^2\\) is math."#
+        let structuredExplanation = try JSONSerialization.data(withJSONObject: [
+            "format": "markdown",
+            "explanation": overEscapedExplanation,
+        ])
+        let structuredExplanationText = try require(
+            String(data: structuredExplanation, encoding: .utf8),
+            "Could not encode the Explain regression envelope."
+        )
+        let responseWithEscapedMath = try JSONSerialization.data(withJSONObject: [
+            "status": "completed",
+            "output": [[
+                "type": "message",
+                "content": [[
+                    "type": "output_text",
+                    "text": structuredExplanationText,
+                ]],
+            ]],
+        ])
+        let parsedEscapedMath = try ResponsesAPIClient.parseCompletion(
+            from: responseWithEscapedMath,
+            outputSchema: .explanationResponse,
+            allowedOutputFormats: [.plainText, .markdown]
+        )
+        try expect(
+            parsedEscapedMath.output.source
+                == #"For layer \(l\): \\\\frac is literal code, but \(x^2\) is math."#,
+            "The Explain structured-output path did not repair decoded Markdown math."
         )
 
         let explainGlitchPayload = Data(
@@ -597,6 +701,197 @@ struct CoreChecks {
                 frontmostProcessIdentifier: 99
             ),
             "A different frontmost process must not receive replacement text."
+        )
+        try expect(
+            !SelectionReplacementPolicy.shouldReplace(
+                originalText: "original",
+                currentText: "original",
+                originalProcessIdentifier: 42,
+                frontmostProcessIdentifier: 42,
+                focusedElementMatches: false
+            ),
+            "A stale field in the same application must not receive replacement text."
+        )
+        try expect(
+            !SelectionCapturePolicy.containsMeaningfulText(" \n\t\u{00A0}\u{200B}\u{2060}\u{FEFF}"),
+            "Invisible web-editor proxy text must not be accepted as a selection."
+        )
+        try expect(
+            SelectionCapturePolicy.containsMeaningfulText(".")
+                && SelectionCapturePolicy.containsMeaningfulText("É中文かな")
+                && SelectionCapturePolicy.containsMeaningfulText("MiXeD Case"),
+            "Visible punctuation, mixed scripts, accents, and casing must remain valid selections."
+        )
+        try expect(
+            SelectionCapturePolicy.shouldPreferKeyboardCopy(
+                role: "AXTextArea",
+                applicationBundleIdentifier: "com.google.Chrome"
+            )
+                && SelectionCapturePolicy.shouldPreferKeyboardCopy(
+                    role: "AXWebArea",
+                    applicationBundleIdentifier: "com.example.CustomEditor"
+                )
+                && SelectionCapturePolicy.shouldPreferKeyboardCopy(
+                    role: "AXTextArea",
+                    applicationBundleIdentifier: "com.example.UnknownEditor"
+                )
+                && !SelectionCapturePolicy.shouldPreferKeyboardCopy(
+                    role: "AXTextArea",
+                    applicationBundleIdentifier: "com.apple.TextEdit"
+            ),
+            "Web, canvas, Electron, and unknown editors should prefer authoritative keyboard copy while known native editors keep Accessibility-first capture."
+        )
+        try expect(
+            !SelectionCapturePolicy.shouldRestoreFocusUsingAccessibility(
+                role: "AXTextArea",
+                applicationBundleIdentifier: "com.google.Chrome"
+            )
+                && !SelectionCapturePolicy.shouldRestoreFocusUsingAccessibility(
+                    role: "AXWebArea",
+                    applicationBundleIdentifier: "com.apple.Safari"
+                )
+                && SelectionCapturePolicy.shouldRestoreFocusUsingAccessibility(
+                    role: "AXTextArea",
+                    applicationBundleIdentifier: "com.apple.TextEdit"
+            ),
+            "Only known native editors may receive Accessibility focus writes during prompt reactivation."
+        )
+        try expect(
+            SelectionFocusVerificationPolicy.shouldRetry(
+                afterAttempt: 0,
+                focusedElementMatches: false
+            )
+                && !SelectionFocusVerificationPolicy.shouldRetry(
+                    afterAttempt: 0,
+                    focusedElementMatches: true
+                )
+                && !SelectionFocusVerificationPolicy.shouldRetry(
+                    afterAttempt: SelectionFocusVerificationPolicy.maximumAttempts - 1,
+                    focusedElementMatches: false
+                ),
+            "Focus verification should poll while web/Electron focus settles, but stop on a match or at the bounded limit."
+        )
+        try expect(
+            SelectionOutputPolicy.matchSelectionBoundary(
+                originalSelection: "one line",
+                output: "refined line\r\n"
+            ) == "refined line"
+                && SelectionOutputPolicy.matchSelectionBoundary(
+                    originalSelection: "one line",
+                    output: "refined line\u{2029}"
+                ) == "refined line"
+                && SelectionOutputPolicy.matchSelectionBoundary(
+                    originalSelection: "line with boundary\n",
+                    output: "refined line\n"
+                ) == "refined line\n"
+                && SelectionOutputPolicy.matchSelectionBoundary(
+                    originalSelection: "line with boundary\n",
+                    output: "refined line"
+                ) == "refined line\n"
+                && SelectionOutputPolicy.matchSelectionBoundary(
+                    originalSelection: "two boundaries\n\n",
+                    output: "refined line\n"
+                ) == "refined line\n\n"
+                && SelectionOutputPolicy.matchSelectionBoundary(
+                    originalSelection: "one line",
+                    output: "refined line"
+                ) == "refined line",
+            "A transformation must not introduce a trailing paragraph boundary when the copied selection had none."
+        )
+        try expect(
+            SelectionReplacementPolicy.shouldAttemptReplacement(for: .refine)
+                && SelectionReplacementPolicy.shouldAttemptReplacement(for: .translate)
+                && SelectionReplacementPolicy.shouldAttemptReplacement(for: .format)
+                && !SelectionReplacementPolicy.shouldAttemptReplacement(for: .ocr),
+            "Every selected-text transformation should share replace-if-unchanged delivery."
+        )
+        try expect(
+            SelectionReplacementPolicy.shouldUseDirectAccessibilityReplacement(
+                role: "AXTextArea",
+                selectedTextSettable: true,
+                applicationBundleIdentifier: "com.apple.TextEdit"
+            )
+                && !SelectionReplacementPolicy.shouldUseDirectAccessibilityReplacement(
+                    role: "AXWebArea",
+                    selectedTextSettable: true,
+                    applicationBundleIdentifier: "com.google.Chrome"
+                )
+                && !SelectionReplacementPolicy.shouldUseDirectAccessibilityReplacement(
+                    role: "AXTextArea",
+                    selectedTextSettable: true,
+                    applicationBundleIdentifier: "com.google.Chrome"
+                )
+                && !SelectionReplacementPolicy.shouldUseDirectAccessibilityReplacement(
+                    role: "AXTextArea",
+                    selectedTextSettable: false,
+                    applicationBundleIdentifier: "com.apple.TextEdit"
+                )
+                && !SelectionReplacementPolicy.shouldUseDirectAccessibilityReplacement(
+                    role: "AXTextArea",
+                    selectedTextSettable: true,
+                    applicationBundleIdentifier: "com.example.UnlistedBrowser"
+                ),
+            "Only known-native, settable text controls may use direct Accessibility replacement."
+        )
+        try expect(
+            SelectionReplacementPolicy.verifyReplacement(
+                originalText: "before",
+                resultText: "after",
+                observedText: "after",
+                originalProcessIdentifier: 42,
+                frontmostProcessIdentifier: 42,
+                focusedElementMatches: true
+            ) == .verified,
+            "An observed result in the same field should verify replacement."
+        )
+        try expect(
+            SelectionReplacementPolicy.verifyReplacement(
+                originalText: "before",
+                resultText: "after",
+                observedText: "before",
+                originalProcessIdentifier: 42,
+                frontmostProcessIdentifier: 42,
+                focusedElementMatches: true
+            ) == .unchanged,
+            "An unchanged selection should permit the safe fallback strategy."
+        )
+        try expect(
+            SelectionReplacementPolicy.verifyReplacement(
+                originalText: "before",
+                resultText: "after",
+                observedText: nil,
+                originalProcessIdentifier: 42,
+                frontmostProcessIdentifier: 42,
+                focusedElementMatches: true
+            ) == .indeterminate,
+            "An unobservable post-delivery state must not be reported as replaced."
+        )
+        try expect(
+            SelectionDeliveryPolicy.outcome(
+                clipboardWriteSucceeded: false,
+                replacementEligible: true,
+                replacementDispatched: false,
+                verification: .indeterminate
+            ) == .clipboardFailed
+                && SelectionDeliveryPolicy.outcome(
+                    clipboardWriteSucceeded: true,
+                    replacementEligible: false,
+                    replacementDispatched: false,
+                    verification: .indeterminate
+                ) == .copied
+                && SelectionDeliveryPolicy.outcome(
+                    clipboardWriteSucceeded: true,
+                    replacementEligible: true,
+                    replacementDispatched: true,
+                    verification: .verified
+                ) == .replaced
+                && SelectionDeliveryPolicy.outcome(
+                    clipboardWriteSucceeded: true,
+                    replacementEligible: true,
+                    replacementDispatched: true,
+                    verification: .indeterminate
+                ) == .replacementSent,
+            "Delivery outcomes must distinguish verified replacement, attempted replacement, copy-only, and clipboard failure."
         )
     }
 
@@ -1324,6 +1619,125 @@ struct CoreChecks {
                 && completion.totalTokens == 13,
             "Successful mock response was parsed incorrectly."
         )
+    }
+
+    private static func emptyProviderFallbackCheck() async throws {
+        let payload = Data(
+            #"""
+            {
+              "choices": [{
+                "message": {
+                  "role": "assistant",
+                  "content": "{\"format\":\"plain_text\",\"content\":\"\",\"extra\":true}"
+                },
+                "finish_reason": "stop"
+              }],
+              "model": "custom-openai-model"
+            }
+            """#.utf8
+        )
+        let client = AIProviderClient(transport: MockTransport { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/2",
+                headerFields: nil
+            )!
+            return (payload, response)
+        })
+        let configuration = AIProviderConfiguration(
+            provider: .openAICompatible,
+            endpoint: URL(string: "https://example.test/v1/chat/completions")!,
+            model: "custom-openai-model"
+        )
+
+        do {
+            _ = try await client.complete(
+                prompt: PromptBuilder.make(action: .refine, selectedText: "Text"),
+                apiKey: "test-secret-key-not-real",
+                safetyIdentifier: "test-safety-id",
+                configuration: configuration
+            )
+            throw CheckFailure(
+                description: "An empty structured fallback escaped as nonempty raw JSON."
+            )
+        } catch let error as ResponsesAPIError {
+            guard case .invalidOutput = error else {
+                throw CheckFailure(
+                    description: "Empty structured fallback failed with \(error) instead of invalidOutput."
+                )
+            }
+        }
+    }
+
+    private static func boundedSubprocessOutputCheck() async throws {
+        let output = await BoundedProcessOutput.capture(
+            executableURL: URL(fileURLWithPath: "/usr/bin/printf"),
+            arguments: ["clipboard text"],
+            timeoutNanoseconds: 1_000_000_000
+        )
+        try expect(
+            output.flatMap { String(data: $0, encoding: .utf8) } == "clipboard text",
+            "Bounded subprocess output did not return completed standard output."
+        )
+
+        let startedAt = Date()
+        let timedOut = await BoundedProcessOutput.capture(
+            executableURL: URL(fileURLWithPath: "/bin/sleep"),
+            arguments: ["2"],
+            timeoutNanoseconds: 60_000_000
+        )
+        try expect(
+            timedOut == nil && Date().timeIntervalSince(startedAt) < 1,
+            "A stalled pasteboard helper must be terminated well before the app watchdog."
+        )
+
+        let concurrentResults = await withTaskGroup(
+            of: (Int, String?).self,
+            returning: [Int: String].self
+        ) { group in
+            for index in 0..<8 {
+                group.addTask {
+                    let expected = "capture-\(index)"
+                    let data = await BoundedProcessOutput.capture(
+                        executableURL: URL(fileURLWithPath: "/bin/sh"),
+                        arguments: ["-c", "sleep 0.05; printf %s \"$1\"", "bounded", expected],
+                        timeoutNanoseconds: 1_000_000_000
+                    )
+                    return (index, data.flatMap { String(data: $0, encoding: .utf8) })
+                }
+            }
+            var results: [Int: String] = [:]
+            for await (index, value) in group {
+                results[index] = value
+            }
+            return results
+        }
+        try expect(
+            concurrentResults.count == 8
+                && concurrentResults.allSatisfy { index, value in
+                    value == "capture-\(index)"
+                },
+            "Concurrent bounded captures shared or corrupted their temporary output file."
+        )
+
+        let mainActorCaptures = (0..<3).map { index in
+            Task { @MainActor in
+                let data = await BoundedProcessOutput.capture(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/printf"),
+                    arguments: ["main-actor-\(index)"],
+                    timeoutNanoseconds: 1_000_000_000
+                )
+                return data.flatMap { String(data: $0, encoding: .utf8) }
+            }
+        }
+        for (index, task) in mainActorCaptures.enumerated() {
+            let value = await task.value
+            try expect(
+                value == "main-actor-\(index)",
+                "A completed clipboard helper must not stall the main actor."
+            )
+        }
     }
 
     private static func transportLifecycleCheck() async throws {

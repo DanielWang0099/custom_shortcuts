@@ -271,17 +271,10 @@ public struct AIProviderClient: Sendable {
                 allowedOutputFormats: allowedOutputFormats
             )
         } catch {
-            let sanitized = AIOutputDocumentSanitizer.sanitizeGlitchMarkers(text)
-            let detectedFormat = AIOutputFormatDetector.detect(sanitized)
-            let format = allowedOutputFormats.contains(detectedFormat)
-                ? detectedFormat
-                : (allowedOutputFormats.first ?? .plainText)
-            let fallbackDoc = AIOutputDocument(format: format, source: sanitized)
-            if (try? AIOutputDocumentValidator.validate(fallbackDoc)) != nil {
-                output = fallbackDoc
-            } else {
-                output = AIOutputDocument(format: .plainText, source: sanitized)
-            }
+            output = try fallbackOutputDocument(
+                from: text,
+                allowedOutputFormats: allowedOutputFormats
+            )
         }
 
         let usage = response.usage
@@ -329,17 +322,10 @@ public struct AIProviderClient: Sendable {
                 allowedOutputFormats: allowedOutputFormats
             )
         } catch {
-            let sanitized = AIOutputDocumentSanitizer.sanitizeGlitchMarkers(text)
-            let detectedFormat = AIOutputFormatDetector.detect(sanitized)
-            let format = allowedOutputFormats.contains(detectedFormat)
-                ? detectedFormat
-                : (allowedOutputFormats.first ?? .plainText)
-            let fallbackDoc = AIOutputDocument(format: format, source: sanitized)
-            if (try? AIOutputDocumentValidator.validate(fallbackDoc)) != nil {
-                output = fallbackDoc
-            } else {
-                output = AIOutputDocument(format: .plainText, source: sanitized)
-            }
+            output = try fallbackOutputDocument(
+                from: text,
+                allowedOutputFormats: allowedOutputFormats
+            )
         }
 
         let usage = response.usage
@@ -352,6 +338,35 @@ public struct AIProviderClient: Sendable {
             outputTokens: outputTokens,
             totalTokens: inputTokens + outputTokens
         )
+    }
+
+    private func fallbackOutputDocument(
+        from text: String,
+        allowedOutputFormats: [AIOutputFormat]
+    ) throws -> AIOutputDocument {
+        let document: AIOutputDocument
+        if let extracted = AIOutputDocumentSanitizer.extractTextDocument(from: text) {
+            document = extracted
+        } else {
+            let sanitized = AIOutputDocumentSanitizer.sanitizeGlitchMarkers(text)
+            let detectedFormat = AIOutputFormatDetector.detect(sanitized)
+            let format = allowedOutputFormats.contains(detectedFormat)
+                ? detectedFormat
+                : (allowedOutputFormats.first ?? .plainText)
+            document = AIOutputDocument(format: format, source: sanitized)
+        }
+
+        guard allowedOutputFormats.contains(document.format) else {
+            throw ResponsesAPIError.invalidOutput(
+                "The AI provider returned a disallowed output format."
+            )
+        }
+        do {
+            try AIOutputDocumentValidator.validate(document)
+        } catch let error as AIOutputValidationError {
+            throw ResponsesAPIError.invalidOutput(error.localizedDescription)
+        }
+        return document
     }
 
     private func parseAPIErrorMessage(from data: Data) -> String {

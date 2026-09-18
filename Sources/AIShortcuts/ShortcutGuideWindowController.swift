@@ -195,7 +195,7 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
         case .translate:
             return (
                 "Translate selected text using a free-form target such as “Japanese, formal”.",
-                "Result · Preserves detected Markdown/equation mode, copies the translation, and leaves the original selection untouched.",
+                "Result · Preserves detected Markdown/equation mode; replaces an unchanged selection or copies the translation.",
                 "Accessibility + configured provider"
             )
         case .format:

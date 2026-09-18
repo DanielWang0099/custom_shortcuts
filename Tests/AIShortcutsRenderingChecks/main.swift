@@ -21,7 +21,11 @@ struct RenderingChecks {
     static func main() {
         do {
             try markdownAndClipboardCheck()
+            try emptyClipboardWriteCheck()
+            try multiFormatClipboardSnapshotCheck()
+            try terminalBoundaryClipboardCheck()
             try webTranscriptCheck()
+            try escapedExplainMathCheck()
             try mathAttachmentCheck()
             try navierStokesMathCheck()
             try fractionAndScriptLayoutCheck()
@@ -96,6 +100,113 @@ struct RenderingChecks {
                 && table.attributedString.string.contains("Count"),
             "Markdown tables were not rendered as a single native table."
         )
+    }
+
+    private static func emptyClipboardWriteCheck() throws {
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("AIShortcutsRenderingChecks.\(UUID().uuidString)")
+        )
+        pasteboard.clearContents()
+        pasteboard.setString("existing clipboard value", forType: .string)
+
+        let rendered = NativeRichTextRenderer().render(
+            AIOutputDocument(
+                format: .plainText,
+                source: #"{"format":"plain_text","content":""}"#
+            )
+        )
+        let didWrite = rendered.clipboardPayload.write(to: pasteboard)
+
+        try expect(
+            !didWrite
+                && pasteboard.string(forType: .string) == "existing clipboard value",
+            "An empty result erased the existing clipboard value."
+        )
+
+        let validPayload = RichClipboardPayload(
+            plainText: "replacement text",
+            htmlData: Data("<p>replacement text</p>".utf8),
+            rtfData: nil,
+            rtfdData: nil
+        )
+        try expect(
+            validPayload.write(to: pasteboard)
+                && pasteboard.string(forType: .string) == "replacement text",
+            "A valid rich payload did not leave a verified plain-text clipboard fallback."
+        )
+    }
+
+    private static func terminalBoundaryClipboardCheck() throws {
+        let rendered = NativeRichTextRenderer().render(
+            AIOutputDocument(
+                format: .plainText,
+                source: "refined paragraph\n",
+                preserveTrailingLineBreaks: true
+            )
+        )
+        try expect(
+            rendered.clipboardPayload.plainText == "refined paragraph\n"
+                && rendered.attributedString.string == "refined paragraph\n",
+            "A selected trailing paragraph boundary was lost from rich clipboard output."
+        )
+
+        let withoutBoundary = NativeRichTextRenderer().render(
+            AIOutputDocument(format: .plainText, source: "refined paragraph\n")
+        )
+        try expect(
+            withoutBoundary.clipboardPayload.plainText == "refined paragraph"
+                && withoutBoundary.attributedString.string == "refined paragraph",
+            "A trailing paragraph boundary was introduced without an original selection boundary."
+        )
+    }
+
+    private static func multiFormatClipboardSnapshotCheck() throws {
+        let source = NSPasteboard(
+            name: NSPasteboard.Name("AIShortcutsSnapshotSource.\(UUID().uuidString)")
+        )
+        source.clearContents()
+        let item = NSPasteboardItem()
+        let html = Data("<b>Styled text</b>".utf8)
+        let image = Data([0x89, 0x50, 0x4e, 0x47])
+        item.setString("Styled text", forType: .string)
+        item.setData(html, forType: .html)
+        item.setData(image, forType: .png)
+        try expect(source.writeObjects([item]), "Could not prepare a multi-format pasteboard.")
+
+        let snapshot = try expectSnapshot(
+            ClipboardSnapshot.capture(from: source),
+            "Could not capture all pasteboard representations."
+        )
+        let encoded = try expectSnapshot(
+            snapshot.encoded(),
+            "Could not encode the multi-format pasteboard snapshot."
+        )
+        let decoded = try expectSnapshot(
+            ClipboardSnapshot.decode(encoded),
+            "Could not decode the multi-format pasteboard snapshot."
+        )
+        let restored = NSPasteboard(
+            name: NSPasteboard.Name("AIShortcutsSnapshotRestored.\(UUID().uuidString)")
+        )
+        try expect(
+            decoded.restore(to: restored)
+                && restored.string(forType: .string) == "Styled text"
+                && restored.data(forType: .html) == html
+                && restored.data(forType: .png) == image
+                && restored.pasteboardItems?.first?.types
+                    == source.pasteboardItems?.first?.types,
+            "Preserving the clipboard silently discarded HTML or image representations."
+        )
+    }
+
+    private static func expectSnapshot<T>(
+        _ value: T?,
+        _ message: String
+    ) throws -> T {
+        guard let value else {
+            throw CheckFailure(description: message)
+        }
+        return value
     }
 
     private static func webTranscriptCheck() throws {
@@ -205,6 +316,29 @@ struct RenderingChecks {
             backpropagationRendered.hasMathAttachments
                 && backpropagationRendered.fallbackMathSources.isEmpty,
             "The backpropagation equation was incorrectly left as raw LaTeX."
+        )
+    }
+
+    private static func escapedExplainMathCheck() throws {
+        let providerSource = #"""
+        Backpropagation uses the chain rule. For layer \\(l\\):
+
+        - \\(z^{[l]} = W^{[l]}a^{[l-1]} + b^{[l]}\\)
+        - Output error: \\(
+        \delta^{[L]} = \frac{\partial \mathcal{L}}{\partial a^{[L]}}
+        \\)
+        """#
+        let renderer = WebRichTextRenderer()
+        let rendered = renderer.render(
+            AIOutputDocument(format: .markdown, source: providerSource)
+        )
+        try expect(
+            rendered.components(separatedBy: "data-math").count - 1 == 3
+                && rendered.contains("class=\"math-inline\"")
+                && rendered.contains("class=\"math-block\"")
+                && !rendered.contains(#"\\("#)
+                && !rendered.contains(#"\\)"#),
+            "Explain did not repair and render over-escaped Markdown math delimiters."
         )
     }
 

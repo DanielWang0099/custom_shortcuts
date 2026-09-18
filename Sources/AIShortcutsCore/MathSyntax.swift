@@ -63,9 +63,13 @@ public enum MathSyntax {
             }
 
             let candidate: (opening: String, closing: String, display: Bool)?
-            if source[index...].hasPrefix("\\[") {
+            if source[index...].hasPrefix("\\["),
+               !isEscaped(source, at: index)
+            {
                 candidate = ("\\[", "\\]", true)
-            } else if source[index...].hasPrefix("\\(") {
+            } else if source[index...].hasPrefix("\\("),
+                      !isEscaped(source, at: index)
+            {
                 candidate = ("\\(", "\\)", false)
             } else if source[index...].hasPrefix("$$") {
                 candidate = ("$$", "$$", true)
@@ -81,9 +85,10 @@ public enum MathSyntax {
             }
 
             guard let candidate,
-                  let closingRange = source.range(
-                      of: candidate.closing,
-                      range: source.index(after: index)..<source.endIndex
+                  let closingRange = firstClosingRange(
+                      in: source,
+                      delimiter: candidate.closing,
+                      after: source.index(index, offsetBy: candidate.opening.count)
                   )
             else {
                 index = source.index(after: index)
@@ -166,10 +171,13 @@ public enum MathSyntax {
                 continue
             }
 
-            if source[index...].hasPrefix("\\(") {
-                guard let closingRange = source.range(
-                    of: "\\)",
-                    range: source.index(index, offsetBy: 2)..<source.endIndex
+            if source[index...].hasPrefix("\\("),
+               !isEscaped(source, at: index)
+            {
+                guard let closingRange = firstClosingRange(
+                    in: source,
+                    delimiter: "\\)",
+                    after: source.index(index, offsetBy: 2)
                 ) else {
                     return true
                 }
@@ -177,10 +185,13 @@ public enum MathSyntax {
                 isLineStart = false
                 continue
             }
-            if source[index...].hasPrefix("\\[") {
-                guard let closingRange = source.range(
-                    of: "\\]",
-                    range: source.index(index, offsetBy: 2)..<source.endIndex
+            if source[index...].hasPrefix("\\["),
+               !isEscaped(source, at: index)
+            {
+                guard let closingRange = firstClosingRange(
+                    in: source,
+                    delimiter: "\\]",
+                    after: source.index(index, offsetBy: 2)
                 ) else {
                     return true
                 }
@@ -325,6 +336,24 @@ public enum MathSyntax {
     private static func endOfLine(in source: String, from start: String.Index) -> String.Index {
         source.range(of: "\n", range: start..<source.endIndex)?.lowerBound
             ?? source.endIndex
+    }
+
+    private static func firstClosingRange(
+        in source: String,
+        delimiter: String,
+        after start: String.Index
+    ) -> Range<String.Index>? {
+        var cursor = start
+        while let range = source.range(
+            of: delimiter,
+            range: cursor..<source.endIndex
+        ) {
+            if delimiter.first != "\\" || !isEscaped(source, at: range.lowerBound) {
+                return range
+            }
+            cursor = range.upperBound
+        }
+        return nil
     }
 
     private static func nextCharacter(

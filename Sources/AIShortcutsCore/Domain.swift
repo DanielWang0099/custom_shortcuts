@@ -392,20 +392,195 @@ public enum PromptBuilder {
     }
 }
 
+public enum SelectionReplacementVerification: Equatable, Sendable {
+    case verified
+    case unchanged
+    case indeterminate
+}
+
+public enum SelectionDeliveryOutcome: Equatable, Sendable {
+    case replaced
+    case replacementSent
+    case copied
+    case clipboardFailed
+}
+
+public enum SelectionDeliveryPolicy {
+    public static func outcome(
+        clipboardWriteSucceeded: Bool,
+        replacementEligible: Bool,
+        replacementDispatched: Bool,
+        verification: SelectionReplacementVerification
+    ) -> SelectionDeliveryOutcome {
+        guard clipboardWriteSucceeded else {
+            return .clipboardFailed
+        }
+        guard replacementEligible, replacementDispatched else {
+            return .copied
+        }
+        return verification == .verified ? .replaced : .replacementSent
+    }
+}
+
+public enum SelectionCapturePolicy {
+    public static func containsMeaningfulText(_ text: String?) -> Bool {
+        guard let text else {
+            return false
+        }
+        return text.unicodeScalars.contains { scalar in
+            if CharacterSet.whitespacesAndNewlines.contains(scalar)
+                || scalar.properties.generalCategory == .control
+                || scalar.properties.generalCategory == .format
+                || scalar.value == 0xFFFC
+            {
+                return false
+            }
+            return true
+        }
+    }
+
+    public static func shouldPreferKeyboardCopy(
+        role: String?,
+        applicationBundleIdentifier: String?
+    ) -> Bool {
+        !isKnownNativeTextEditor(
+            role: role,
+            applicationBundleIdentifier: applicationBundleIdentifier
+        )
+    }
+
+    public static func shouldRestoreFocusUsingAccessibility(
+        role: String?,
+        applicationBundleIdentifier: String?
+    ) -> Bool {
+        isKnownNativeTextEditor(
+            role: role,
+            applicationBundleIdentifier: applicationBundleIdentifier
+        )
+    }
+
+    fileprivate static func isKnownNativeTextEditor(
+        role: String?,
+        applicationBundleIdentifier: String?
+    ) -> Bool {
+        guard role == "AXTextField" || role == "AXTextArea",
+              let bundleIdentifier = applicationBundleIdentifier?.lowercased()
+        else {
+            return false
+        }
+        let knownNativeEditorIdentifiers = [
+            "com.apple.textedit",
+            "com.apple.notes",
+            "com.apple.mail",
+            "com.apple.iwork.pages",
+            "com.apple.dt.xcode",
+            "com.apple.scripteditor",
+            "com.apple.reminders",
+            "com.microsoft.word",
+        ]
+        return knownNativeEditorIdentifiers.contains { identifier in
+            bundleIdentifier == identifier || bundleIdentifier.hasPrefix("\(identifier).")
+        }
+    }
+}
+
+public enum SelectionFocusVerificationPolicy {
+    public static let maximumAttempts = 20
+    public static let retryIntervalNanoseconds: UInt64 = 15_000_000
+
+    public static func shouldRetry(
+        afterAttempt attempt: Int,
+        focusedElementMatches: Bool
+    ) -> Bool {
+        !focusedElementMatches && attempt + 1 < maximumAttempts
+    }
+}
+
+public enum SelectionOutputPolicy {
+    public static func matchSelectionBoundary(
+        originalSelection: String,
+        output: String
+    ) -> String {
+        var adjusted = output
+        while let lastScalar = adjusted.unicodeScalars.last,
+              CharacterSet.newlines.contains(lastScalar)
+        {
+            let scalarIndex = adjusted.unicodeScalars.index(
+                before: adjusted.unicodeScalars.endIndex
+            )
+            adjusted.removeSubrange(scalarIndex..<adjusted.endIndex)
+        }
+        return adjusted + trailingLineBreaks(in: originalSelection)
+    }
+
+    private static func trailingLineBreaks(in text: String) -> String {
+        var start = text.unicodeScalars.endIndex
+        while start > text.unicodeScalars.startIndex {
+            let previous = text.unicodeScalars.index(before: start)
+            guard CharacterSet.newlines.contains(text.unicodeScalars[previous]) else {
+                break
+            }
+            start = previous
+        }
+        return String(text[start..<text.endIndex])
+    }
+}
+
 public enum SelectionReplacementPolicy {
+    public static func shouldAttemptReplacement(for action: AIShortcutAction) -> Bool {
+        action == .refine || action == .translate || action == .format
+    }
+
+    public static func shouldUseDirectAccessibilityReplacement(
+        role: String?,
+        selectedTextSettable: Bool,
+        applicationBundleIdentifier: String?
+    ) -> Bool {
+        selectedTextSettable && SelectionCapturePolicy.isKnownNativeTextEditor(
+            role: role,
+            applicationBundleIdentifier: applicationBundleIdentifier
+        )
+    }
+
     public static func shouldReplace(
         originalText: String,
         currentText: String?,
         originalProcessIdentifier: pid_t,
-        frontmostProcessIdentifier: pid_t?
+        frontmostProcessIdentifier: pid_t?,
+        focusedElementMatches: Bool = true
     ) -> Bool {
-        guard frontmostProcessIdentifier == originalProcessIdentifier else {
+        guard frontmostProcessIdentifier == originalProcessIdentifier,
+              focusedElementMatches
+        else {
             return false
         }
         guard let currentText else {
             return false
         }
         return comparableText(currentText) == comparableText(originalText)
+    }
+
+    public static func verifyReplacement(
+        originalText: String,
+        resultText: String,
+        observedText: String?,
+        originalProcessIdentifier: pid_t,
+        frontmostProcessIdentifier: pid_t?,
+        focusedElementMatches: Bool
+    ) -> SelectionReplacementVerification {
+        guard frontmostProcessIdentifier == originalProcessIdentifier,
+              focusedElementMatches,
+              let observedText
+        else {
+            return .indeterminate
+        }
+        if comparableText(observedText) == comparableText(resultText) {
+            return .verified
+        }
+        if comparableText(observedText) == comparableText(originalText) {
+            return .unchanged
+        }
+        return .indeterminate
     }
 
     private static func comparableText(_ text: String) -> String {

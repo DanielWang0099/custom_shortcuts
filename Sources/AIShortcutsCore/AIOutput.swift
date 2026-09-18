@@ -8,23 +8,54 @@ public struct AIOutputDocument: Codable, Equatable, Sendable {
     public let format: AIOutputFormat
     public let source: String
 
-    public init(format: AIOutputFormat, source: String) {
+    public init(
+        format: AIOutputFormat,
+        source: String,
+        preserveTrailingLineBreaks: Bool = false
+    ) {
         self.format = format
-        self.source = Self.normalize(source)
+        self.source = Self.normalize(
+            source,
+            preserveTrailingLineBreaks: preserveTrailingLineBreaks
+        )
     }
 
     public var isEmpty: Bool {
         source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private static func normalize(_ source: String) -> String {
-        source
+    private static func normalize(
+        _ source: String,
+        preserveTrailingLineBreaks: Bool
+    ) -> String {
+        let normalized = source
             .precomposedStringWithCanonicalMapping
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "\u{2028}", with: "\n")
             .replacingOccurrences(of: "\u{2029}", with: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard preserveTrailingLineBreaks else {
+            return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let boundary = terminalLineBreaks(in: normalized)
+        let bodyEnd = normalized.index(
+            normalized.endIndex,
+            offsetBy: -boundary.count
+        )
+        return normalized[..<bodyEnd]
+            .trimmingCharacters(in: .whitespacesAndNewlines) + boundary
+    }
+
+    private static func terminalLineBreaks(in source: String) -> String {
+        var start = source.unicodeScalars.endIndex
+        while start > source.unicodeScalars.startIndex {
+            let previous = source.unicodeScalars.index(before: start)
+            guard CharacterSet.newlines.contains(source.unicodeScalars[previous]) else {
+                break
+            }
+            start = previous
+        }
+        return String(source[start..<source.endIndex])
     }
 }
 
@@ -212,7 +243,7 @@ public enum AIOutputPolicy {
     ) -> String {
         let formats = allowedFormats.map(\.rawValue).joined(separator: " or ")
         return """
-        Return exactly one JSON object with the fields `format` and `\(field)`, with no code fence or commentary. The `format` value must be \(formats). When using Markdown, use Markdown only for useful structure, use \\(...\\) for inline equations and \\[...\\] for display equations, and never use raw HTML, embedded images, or executable links. When using plain_text, preserve literal punctuation and source markers instead of interpreting them.
+        Return exactly one JSON object with the fields `format` and `\(field)`, with no code fence or commentary. The `format` value must be \(formats). When using Markdown, use Markdown only for useful structure, use \\(...\\) for inline equations and \\[...\\] for display equations, and never use raw HTML, embedded images, or executable links. After JSON decoding, every LaTeX delimiter and command must contain exactly one backslash; JSON escaping must not leave doubled backslashes in the decoded Markdown. When using plain_text, preserve literal punctuation and source markers instead of interpreting them.
         """
     }
 }
@@ -254,11 +285,192 @@ public enum AIOutputDocumentSanitizer {
     }
 
     public static func unwrapOrSanitize(_ document: AIOutputDocument) -> AIOutputDocument {
-        if let unwrapped = unwrapTextDocument(from: document) {
-            return unwrapped
+        let resolved = unwrapTextDocument(from: document) ?? document
+        let terminalBoundary = terminalLineBreaks(in: resolved.source)
+        let sanitized = sanitizeGlitchMarkers(resolved.source)
+        let repaired = resolved.format == .markdown
+            ? repairMarkdownMathEscaping(sanitized)
+            : sanitized
+        return AIOutputDocument(
+            format: resolved.format,
+            source: repaired + terminalBoundary,
+            preserveTrailingLineBreaks: !terminalBoundary.isEmpty
+        )
+    }
+
+    private static func terminalLineBreaks(in source: String) -> String {
+        var start = source.unicodeScalars.endIndex
+        while start > source.unicodeScalars.startIndex {
+            let previous = source.unicodeScalars.index(before: start)
+            guard CharacterSet.newlines.contains(source.unicodeScalars[previous]) else {
+                break
+            }
+            start = previous
         }
-        let sanitized = sanitizeGlitchMarkers(document.source)
-        return AIOutputDocument(format: document.format, source: sanitized)
+        return String(source[start..<source.endIndex])
+    }
+
+    /// Repairs a provider occasionally adding one escaping layer to Markdown
+    /// math delimiters (for example `\\(` in the decoded content instead of
+    /// `\(`). Only paired delimiters outside fenced and inline code are
+    /// changed; LaTeX commands and line breaks inside an expression are left
+    /// untouched. A multiline parenthesized expression is promoted to display
+    /// math because canonical inline math cannot span paragraphs reliably.
+    private static func repairMarkdownMathEscaping(_ source: String) -> String {
+        var result = ""
+        result.reserveCapacity(source.utf8.count)
+
+        var index = source.startIndex
+        var isLineStart = true
+        var inFence = false
+        var inlineCodeTicks: Int?
+
+        while index < source.endIndex {
+            if isLineStart, inlineCodeTicks == nil {
+                let lineEnd = source[index...].firstIndex(of: "\n") ?? source.endIndex
+                let line = source[index..<lineEnd]
+                let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+                if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                    let consumedEnd = lineEnd < source.endIndex
+                        ? source.index(after: lineEnd)
+                        : lineEnd
+                    result.append(contentsOf: source[index..<consumedEnd])
+                    inFence.toggle()
+                    index = consumedEnd
+                    isLineStart = true
+                    continue
+                }
+            }
+
+            let character = source[index]
+            if character == "\n" {
+                result.append(character)
+                index = source.index(after: index)
+                isLineStart = true
+                continue
+            }
+            isLineStart = false
+
+            if inFence {
+                result.append(character)
+                index = source.index(after: index)
+                continue
+            }
+
+            if character == "`" {
+                var runEnd = index
+                var runLength = 0
+                while runEnd < source.endIndex, source[runEnd] == "`" {
+                    runLength += 1
+                    runEnd = source.index(after: runEnd)
+                }
+                result.append(contentsOf: source[index..<runEnd])
+                if let openingTicks = inlineCodeTicks {
+                    if openingTicks == runLength {
+                        inlineCodeTicks = nil
+                    }
+                } else {
+                    inlineCodeTicks = runLength
+                }
+                index = runEnd
+                continue
+            }
+
+            if inlineCodeTicks == nil,
+               let canonicalEnd = canonicalMathEnd(in: source, at: index)
+            {
+                result.append(contentsOf: source[index..<canonicalEnd])
+                index = canonicalEnd
+                continue
+            }
+
+            if inlineCodeTicks == nil,
+               let opener = doubledMathOpener(in: source, at: index),
+               let closingRange = source.range(
+                   of: opener.doubledClosing,
+                   range: opener.expressionStart..<source.endIndex
+               )
+            {
+                let expression = String(source[opener.expressionStart..<closingRange.lowerBound])
+                let isMultiline = expression.contains("\n")
+                result += isMultiline ? "\\[" : opener.canonicalOpening
+                result += expression
+                result += isMultiline ? "\\]" : opener.canonicalClosing
+                index = closingRange.upperBound
+                isLineStart = expression.last == "\n"
+                continue
+            }
+
+            result.append(character)
+            index = source.index(after: index)
+        }
+
+        return result
+    }
+
+    private static func canonicalMathEnd(
+        in source: String,
+        at index: String.Index
+    ) -> String.Index? {
+        guard index == source.startIndex
+                || source[source.index(before: index)] != "\\"
+        else {
+            return nil
+        }
+        let closingCharacter: Character
+        if source[index...].hasPrefix("\\(") {
+            closingCharacter = ")"
+        } else if source[index...].hasPrefix("\\[") {
+            closingCharacter = "]"
+        } else {
+            return nil
+        }
+
+        var cursor = source.index(index, offsetBy: 2)
+        while cursor < source.endIndex {
+            guard source[cursor] == "\\" else {
+                cursor = source.index(after: cursor)
+                continue
+            }
+            var slashCount = 0
+            while cursor < source.endIndex, source[cursor] == "\\" {
+                slashCount += 1
+                cursor = source.index(after: cursor)
+            }
+            if slashCount.isMultiple(of: 2) == false,
+               cursor < source.endIndex,
+               source[cursor] == closingCharacter
+            {
+                return source.index(after: cursor)
+            }
+        }
+        return nil
+    }
+
+    private static func doubledMathOpener(
+        in source: String,
+        at index: String.Index
+    ) -> (
+        expressionStart: String.Index,
+        doubledClosing: String,
+        canonicalOpening: String,
+        canonicalClosing: String
+    )? {
+        guard source[index...].hasPrefix("\\\\(")
+                || source[index...].hasPrefix("\\\\[")
+        else {
+            return nil
+        }
+        if index > source.startIndex,
+           source[source.index(before: index)] == "\\"
+        {
+            return nil
+        }
+        let delimiterEnd = source.index(index, offsetBy: 3)
+        if source[index...].hasPrefix("\\\\(") {
+            return (delimiterEnd, "\\\\)", "\\(", "\\)")
+        }
+        return (delimiterEnd, "\\\\]", "\\[", "\\]")
     }
 
     public static func extractJSONPayload(from source: String) -> Data? {

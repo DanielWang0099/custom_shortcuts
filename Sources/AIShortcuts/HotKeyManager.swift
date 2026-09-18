@@ -205,8 +205,8 @@ final class HotKeyManager {
             return noErr
         }
         if kind == UInt32(kEventHotKeyReleased) {
-            // Dispatch on release so synthesized Command-C is never combined
-            // with the user's still-held Control/Option/Command chord.
+            // Dispatch after the action key is released. SelectionService posts
+            // Copy through an isolated event source to avoid the held modifiers.
             Task(priority: .high) { @MainActor in
                 manager.dispatch(action)
             }

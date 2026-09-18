@@ -363,11 +363,49 @@ public final class WebRichTextRenderer {
         output += ordered ? "<ol>" : "<ul>"
         var index = start
         while index < lines.count, let parts = listParts(in: lines[index]) {
-            output += "<li>\(renderInline(parts.text, displayMathAsInline: true))</li>"
-            index += 1
+            let expanded = expandedListItemText(
+                parts.text,
+                after: index,
+                in: lines
+            )
+            let containsDisplayMath = MathSyntax.mathSpans(in: expanded.text)
+                .contains(where: \.isDisplay)
+            output += "<li>"
+            output += containsDisplayMath
+                ? renderFlow(expanded.text)
+                : renderInline(expanded.text, displayMathAsInline: true)
+            output += "</li>"
+            index = expanded.nextIndex
         }
         output += ordered ? "</ol>" : "</ul>"
         return index
+    }
+
+    private func expandedListItemText(
+        _ firstLine: String,
+        after lineIndex: Int,
+        in lines: [String]
+    ) -> (text: String, nextIndex: Int) {
+        let firstNextIndex = lineIndex + 1
+        guard MathSyntax.hasUnclosedMathDelimiter(in: firstLine) else {
+            return (firstLine, firstNextIndex)
+        }
+
+        var candidate = firstLine
+        var scanIndex = firstNextIndex
+        while scanIndex < lines.count,
+              listParts(in: lines[scanIndex]) == nil
+        {
+            candidate += "\n" + lines[scanIndex]
+            scanIndex += 1
+            if !MathSyntax.hasUnclosedMathDelimiter(in: candidate) {
+                return (candidate, scanIndex)
+            }
+        }
+
+        // Keep malformed math local to the original list line instead of
+        // consuming unrelated paragraphs when no closing delimiter exists.
+        return (firstLine, firstNextIndex)
     }
 
     private func renderQuote(

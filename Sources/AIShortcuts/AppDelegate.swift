@@ -17,9 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let keychainStore = KeychainStore()
     private let apiClient = AIProviderClient()
 
-    // AppKit panels (especially WKWebView) dominate idle memory. Keep only
-    // lightweight state and Carbon registrations resident, then construct the
-    // exact resources an action needs on its key-down event.
+    // Keep shortcut resources resident so the first action after idle has the
+    // same preparation path as a recently used action.
     private var selectionServiceStorage: SelectionService?
     private var screenshotServiceStorage: ScreenshotService?
     private var finderServiceStorage: FinderSelectionService?
@@ -61,17 +60,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var accessibilityRequestIssuedThisRun = false
     private var screenRecordingRequestIssuedThisRun = false
     private var isUserIntentionalQuit = false
-    private var resourceTrimWorkItem: DispatchWorkItem?
-    private var idleSleepWorkItem: DispatchWorkItem?
+    private var networkKeepaliveWorkItem: DispatchWorkItem?
     private var latencyActivityEndWorkItem: DispatchWorkItem?
     private var latencyActivity: NSObjectProtocol?
     private var networkPreconnectTask: Task<Void, Never>?
     private var preconnectGeneration = 0
     private var memoryPressureSource: DispatchSourceMemoryPressure?
-    private var runtimeIsSleeping = true
-
-    private static let resourceTrimDelay: TimeInterval = 30
-    private static let runtimeIdleDelay: TimeInterval = 90
+    private static let networkKeepaliveInterval: TimeInterval = 60
     private static let latencyWakeDuration: TimeInterval = 4
 
     private var selectionService: SelectionService {
@@ -286,8 +281,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         preloadStoredAPIKey()
+        prewarmPrimaryResources()
+        prewarmSecondaryResources()
         refreshFinderAutomationAuthorization()
-        scheduleIdleSleep()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if !self.stateStore.welcomeDismissed {
@@ -303,8 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        resourceTrimWorkItem?.cancel()
-        idleSleepWorkItem?.cancel()
+        networkKeepaliveWorkItem?.cancel()
         latencyActivityEndWorkItem?.cancel()
         networkPreconnectTask?.cancel()
         memoryPressureSource?.cancel()
@@ -348,10 +343,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         )
         source.setEventHandler { [weak self] in
-            self?.enterIdleMode()
+            self?.releaseResourcesUnderMemoryPressure()
         }
         source.resume()
         memoryPressureSource = source
+    }
+
+    private func prewarmPrimaryResources() {
+        let start = Date()
+        _ = selectionService
+        _ = screenshotService
+        _ = richTextRenderer
+        hud.prepare()
+        if promptPanel == nil {
+            promptPanel = PromptPanelController()
+        }
+        let milliseconds = Int(Date().timeIntervalSince(start) * 1_000)
+        logger.notice("Prewarmed primary shortcut resources in \(milliseconds, privacy: .public) ms.")
+    }
+
+    private func prewarmSecondaryResources() {
+        let start = Date()
+        explanationPanel.prepare()
+        finderService.prepare()
+        _ = insertLibrary
+        _ = insertPanel
+        _ = inputLockService
+        _ = inputLockPanel
+        _ = inputLockIndicator
+        _ = clipboardQueueService
+        _ = clipboardQueueIndicator
+        _ = modelSettings
+        _ = shortcutGuide
+        let milliseconds = Int(Date().timeIntervalSince(start) * 1_000)
+        logger.notice("Prewarmed secondary shortcut resources in \(milliseconds, privacy: .public) ms.")
     }
 
     private func wakeForActivationChord() {
@@ -401,14 +426,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         preconnect: Bool,
         latencyCritical: Bool
     ) {
-        resourceTrimWorkItem?.cancel()
-        resourceTrimWorkItem = nil
-        idleSleepWorkItem?.cancel()
-        idleSleepWorkItem = nil
-        if runtimeIsSleeping {
-            runtimeIsSleeping = false
-            logger.debug("Runtime entered ready mode.")
-        }
         if latencyCritical {
             beginLatencyActivity()
             scheduleLatencyActivityEnd()
@@ -417,8 +434,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             apiClient.prepareConnection()
             startNetworkPreconnectionIfNeeded()
         }
-        scheduleResourceTrim()
-        scheduleIdleSleep()
+        scheduleNetworkKeepalive()
     }
 
     private func startNetworkPreconnectionIfNeeded() {
@@ -480,103 +496,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ProcessInfo.processInfo.endActivity(latencyActivity)
     }
 
-    private func scheduleIdleSleep(
-        after requestedDelay: TimeInterval? = nil
-    ) {
-        let delay = requestedDelay ?? Self.runtimeIdleDelay
-        idleSleepWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.enterIdleMode()
-        }
-        idleSleepWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
-    }
-
-    private func scheduleResourceTrim(
-        after requestedDelay: TimeInterval? = nil
-    ) {
-        let delay = requestedDelay ?? Self.resourceTrimDelay
-        resourceTrimWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.enterStandbyMode()
-        }
-        resourceTrimWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
-    }
-
-    private func enterStandbyMode() {
-        resourceTrimWorkItem = nil
-        releaseDormantResources()
-        guard !hasActiveResidentFeature else {
-            scheduleResourceTrim(after: 15)
+    private func scheduleNetworkKeepalive() {
+        networkKeepaliveWorkItem?.cancel()
+        guard apiKey != nil else {
+            networkKeepaliveWorkItem = nil
             return
         }
-        releaseAllocatorPages()
-        logger.debug("Runtime entered network-ready standby mode.")
-    }
-
-    private func enterIdleMode() {
-        resourceTrimWorkItem?.cancel()
-        resourceTrimWorkItem = nil
-        idleSleepWorkItem = nil
-        releaseDormantResources()
-
-        let wasSleeping = runtimeIsSleeping
-        if !requiresWarmNetworkWhileIdle {
-            suspendNetworkResidency()
-        }
-        guard !hasActiveResidentFeature else {
-            scheduleResourceTrim(after: 15)
-            scheduleIdleSleep(after: 15)
-            if !wasSleeping, runtimeIsSleeping {
-                releaseAllocatorPages()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.networkKeepaliveWorkItem = nil
+            if !self.isBusy {
+                self.apiClient.prepareConnection()
+                self.startNetworkPreconnectionIfNeeded()
             }
-            return
+            self.scheduleNetworkKeepalive()
         }
-
-        suspendNetworkResidency()
-        releaseAllocatorPages()
-        logger.debug("Runtime entered low-memory sleep mode.")
+        networkKeepaliveWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.networkKeepaliveInterval,
+            execute: workItem
+        )
     }
 
     private func suspendNetworkResidency() {
-        guard !runtimeIsSleeping else {
-            return
-        }
+        networkKeepaliveWorkItem?.cancel()
+        networkKeepaliveWorkItem = nil
         preconnectGeneration &+= 1
         networkPreconnectTask?.cancel()
         networkPreconnectTask = nil
         apiClient.suspendConnection()
         endLatencyActivity()
-        runtimeIsSleeping = true
+    }
+
+    private func releaseResourcesUnderMemoryPressure() {
+        releaseDormantResources()
+        releaseAllocatorPages()
+        logger.notice("Released dormant resources under memory pressure.")
     }
 
     private func releaseAllocatorPages() {
-        // Return allocator pages after the large AppKit/WebKit object graphs
-        // have been released. This runs off the main thread and only at idle.
+        // Return allocator pages only when macOS reports memory pressure.
         DispatchQueue.global(qos: .utility).async {
             _ = malloc_zone_pressure_relief(nil, 0)
         }
-    }
-
-    private var hasActiveResidentFeature: Bool {
-        isBusy
-            || statusMenu.isOpen
-            || promptPanel?.isVisible == true
-            || modelSettingsStorage?.isVisible == true
-            || welcomeWindowStorage?.isVisible == true
-            || shortcutGuideStorage?.isVisible == true
-            || explanationPanelStorage?.isVisible == true
-            || insertPanelStorage?.isVisible == true
-            || inputLockPanelStorage?.isVisible == true
-            || hudStorage?.isVisible == true
-    }
-
-    private var requiresWarmNetworkWhileIdle: Bool {
-        isBusy
-            || promptPanel?.isVisible == true
-            || explanationPanelStorage?.isVisible == true
-            || insertPanelStorage?.isVisible == true
     }
 
     private func releaseDormantResources() {
@@ -1173,8 +1135,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if inserted {
             hud.showSuccess(text: "Inserted · \(entry.key)")
         } else {
-            selectionService.placeOnClipboard(entry.value)
-            hud.showError("Could not return to the original field · value copied")
+            if selectionService.placeOnClipboard(entry.value) {
+                hud.showError("Could not return to the original field · value copied")
+            } else {
+                hud.showError("Could not paste or update the clipboard")
+            }
         }
     }
 
@@ -1281,7 +1246,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             // OCR is deliberately literal: keep its pasteboard representation
             // to plain text even though other AI outputs may be rich.
-            selectionService.placeOnClipboard(completion.output.source)
+            guard selectionService.placeOnClipboard(completion.output.source) else {
+                hud.showError("OCR finished but the clipboard update failed")
+                return
+            }
             hud.showSuccess(text: "OCR copied")
         } catch {
             guard !Task.isCancelled else {
@@ -1308,7 +1276,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else {
                     return
                 }
-                self.promptPanel = nil
                 guard let instruction else {
                     self.finishOperation()
                     return
@@ -1346,7 +1313,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 throw ResponsesAPIError.missingOutput
             }
             let rendered = richTextRenderer.render(completion.output)
-            selectionService.placeOnClipboard(rendered.clipboardPayload)
+            guard selectionService.placeOnClipboard(rendered.clipboardPayload) else {
+                hud.showError("Calculation finished but the clipboard update failed")
+                return
+            }
             hud.showResult(rendered: rendered)
         } catch {
             guard !Task.isCancelled else {
@@ -1382,7 +1352,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             let joined = result.paths.joined(separator: "\n")
-            selectionService.placeOnClipboard(joined)
+            guard selectionService.placeOnClipboard(joined) else {
+                hud.showError("Could not update the clipboard")
+                return
+            }
             let label: String
             switch result.source {
             case .selection:
@@ -1442,15 +1415,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func captureAndRunTextAction(_ action: AIShortcutAction) async {
+        let captureStart = Date()
         guard let snapshot = await selectionService.captureSelection() else {
             hud.showError("Select some text first")
             finishOperation()
             return
         }
+        let captureMilliseconds = Int(Date().timeIntervalSince(captureStart) * 1_000)
+        logger.notice(
+            "Captured \(action.displayName, privacy: .public) selection in \(captureMilliseconds, privacy: .public) ms."
+        )
         await runTextAction(action, snapshot: snapshot, parameter: nil)
     }
 
     private func captureAndRequestParameter(for action: AIShortcutAction) async {
+        let preparationStart = Date()
         guard let snapshot = await selectionService.captureSelection() else {
             hud.showError("Select some text first")
             finishOperation()
@@ -1479,22 +1458,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else {
                 return
             }
-            self.promptPanel = nil
-            self.selectionService.reactivate(snapshot)
             guard let parameter else {
                 self.finishOperation()
                 return
             }
             self.activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
-                await self?.runTextAction(action, snapshot: snapshot, parameter: parameter)
+                guard let self else {
+                    return
+                }
+                let replacementEligible = await self.selectionService.reactivate(snapshot)
+                guard !Task.isCancelled else {
+                    self.finishOperation()
+                    return
+                }
+                await self.runTextAction(
+                    action,
+                    snapshot: snapshot,
+                    parameter: parameter,
+                    replacementEligible: replacementEligible
+                )
             }
         }
+        let preparationMilliseconds = Int(Date().timeIntervalSince(preparationStart) * 1_000)
+        logger.notice(
+            "Prepared \(action.displayName, privacy: .public) prompt in \(preparationMilliseconds, privacy: .public) ms."
+        )
     }
 
     private func runTextAction(
         _ action: AIShortcutAction,
         snapshot: SelectionSnapshot,
-        parameter: String?
+        parameter: String?,
+        replacementEligible: Bool = true
     ) async {
         defer { finishOperation() }
         let prompt = PromptBuilder.make(
@@ -1505,24 +1500,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let completion = try await callAPI(prompt: prompt)
+            let postResponseStart = Date()
             guard !completion.output.isEmpty else {
                 throw ResponsesAPIError.missingOutput
             }
-            let rendered = richTextRenderer.render(completion.output)
-            if action == .translate {
-                selectionService.placeOnClipboard(rendered.clipboardPayload)
-                hud.showSuccess(text: "Translation copied")
-            } else {
-                let replaced = await selectionService.replaceIfUnchanged(
+            let boundaryMatchedOutput = AIOutputDocument(
+                format: completion.output.format,
+                source: SelectionOutputPolicy.matchSelectionBoundary(
+                    originalSelection: snapshot.text,
+                    output: completion.output.source
+                ),
+                preserveTrailingLineBreaks: true
+            )
+            let rendered = richTextRenderer.render(boundaryMatchedOutput)
+            guard !rendered.clipboardPayload.plainText
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw ResponsesAPIError.invalidOutput(
+                    "The AI provider returned an empty answer."
+                )
+            }
+
+            let delivery: SelectionDeliveryOutcome
+            if replacementEligible,
+               SelectionReplacementPolicy.shouldAttemptReplacement(for: action)
+            {
+                delivery = await selectionService.replaceIfUnchanged(
                     snapshot,
                     with: rendered.clipboardPayload,
                     preferAccessibility: completion.output.format == .plainText
                 )
-                let outcome = action == .refine ? "Refined" : "Formatted"
-                hud.showSuccess(
-                    text: replaced ? "\(outcome) · replaced" : "\(outcome) · copied"
-                )
+            } else if selectionService.placeOnClipboard(rendered.clipboardPayload) {
+                delivery = .copied
+            } else {
+                delivery = .clipboardFailed
             }
+
+            let outcome: String
+            switch action {
+            case .refine:
+                outcome = "Refined"
+            case .translate:
+                outcome = "Translated"
+            case .format:
+                outcome = "Formatted"
+            default:
+                outcome = action.displayName
+            }
+            switch delivery {
+            case .replaced:
+                hud.showSuccess(text: "\(outcome) · replaced")
+            case .replacementSent:
+                hud.showSuccess(text: "\(outcome) · replace sent + copied")
+            case .copied:
+                hud.showSuccess(text: "\(outcome) · copied")
+            case .clipboardFailed:
+                hud.showError("\(outcome) but could not update the clipboard")
+            }
+            let postResponseMilliseconds = Int(
+                Date().timeIntervalSince(postResponseStart) * 1_000
+            )
+            logger.notice(
+                "Handled \(action.displayName, privacy: .public) response in \(postResponseMilliseconds, privacy: .public) ms."
+            )
         } catch {
             guard !Task.isCancelled else {
                 return
@@ -1711,10 +1751,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func beginOperation(_ action: AIShortcutAction) {
-        resourceTrimWorkItem?.cancel()
-        resourceTrimWorkItem = nil
-        idleSleepWorkItem?.cancel()
-        idleSleepWorkItem = nil
         beginLatencyActivity()
         operationGeneration &+= 1
         let generation = operationGeneration
@@ -1748,9 +1784,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         currentAction = nil
         isBusy = false
         statusMenu.setBusy(false)
+        hudStorage?.dismissBusy()
         scheduleLatencyActivityEnd(after: 0.5)
-        scheduleResourceTrim()
-        scheduleIdleSleep()
+        scheduleNetworkKeepalive()
     }
 
     private func cancelCurrentOperation(
@@ -1767,9 +1803,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         task?.cancel()
         screenshotServiceStorage?.cancelCapture()
 
-        let panel = promptPanel
-        promptPanel = nil
-        panel?.cancel()
+        promptPanel?.cancel()
 
         if cancelledAction == .explain {
             let retryRequest = pendingExplanationRequest

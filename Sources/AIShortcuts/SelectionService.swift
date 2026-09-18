@@ -9,7 +9,13 @@ struct SelectionSnapshot {
     let text: String
     let processIdentifier: pid_t
     let application: NSRunningApplication?
-    let accessibilityElement: AXUIElement?
+    let selectionElement: AXUIElement?
+    let focusedElement: AXUIElement?
+}
+
+private struct AccessibilitySelection {
+    let text: String
+    let element: AXUIElement
 }
 
 @MainActor
@@ -17,38 +23,111 @@ final class SelectionService {
     func captureSelection(preserveClipboard: Bool = false) async -> SelectionSnapshot? {
         let frontmost = NSWorkspace.shared.frontmostApplication
         let processIdentifier = frontmost?.processIdentifier ?? 0
+        let focusedElement = focusedElement(for: processIdentifier)
+        let preferKeyboardCopy = SelectionCapturePolicy.shouldPreferKeyboardCopy(
+            role: focusedElement.flatMap {
+                attributeString(kAXRoleAttribute, from: $0)
+            },
+            applicationBundleIdentifier: frontmost?.bundleIdentifier
+        )
 
-        if let element = focusedElement(for: processIdentifier),
-           let selectedText = selectedText(from: element),
-           !selectedText.isEmpty
+        if preferKeyboardCopy,
+           let copiedText = await copyUsingKeyboard(
+               preserveClipboard: preserveClipboard,
+               expectedProcessIdentifier: processIdentifier
+           )
         {
             return SelectionSnapshot(
-                text: selectedText,
+                text: copiedText,
                 processIdentifier: processIdentifier,
                 application: frontmost,
-                accessibilityElement: element
+                selectionElement: nil,
+                focusedElement: focusedElement
             )
         }
 
+        if let focusedElement,
+           let selection = accessibilitySelection(from: focusedElement),
+           SelectionCapturePolicy.containsMeaningfulText(selection.text)
+        {
+            return SelectionSnapshot(
+                text: selection.text,
+                processIdentifier: processIdentifier,
+                application: frontmost,
+                selectionElement: selection.element,
+                focusedElement: focusedElement
+            )
+        }
+
+        guard !preferKeyboardCopy else {
+            return nil
+        }
         guard let copiedText = await copyUsingKeyboard(
             preserveClipboard: preserveClipboard,
             expectedProcessIdentifier: processIdentifier
-        ), !copiedText.isEmpty else {
+        ) else {
             return nil
         }
         return SelectionSnapshot(
             text: copiedText,
             processIdentifier: processIdentifier,
             application: frontmost,
-            accessibilityElement: nil
+            selectionElement: nil,
+            focusedElement: focusedElement
         )
     }
 
-    func reactivate(_ snapshot: SelectionSnapshot) {
-        snapshot.application?.activate(options: [.activateIgnoringOtherApps])
+    func reactivate(_ snapshot: SelectionSnapshot) async -> Bool {
+        guard let application = snapshot.application else {
+            return false
+        }
+        application.activate(options: [.activateIgnoringOtherApps])
+        for _ in 0..<20 {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == snapshot.processIdentifier
+            {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 15_000_000)
+        }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == snapshot.processIdentifier
+        else {
+            return false
+        }
+        guard let focusedElement = snapshot.focusedElement else {
+            return false
+        }
+        if SelectionCapturePolicy.shouldRestoreFocusUsingAccessibility(
+            role: attributeString(kAXRoleAttribute, from: focusedElement),
+            applicationBundleIdentifier: application.bundleIdentifier
+        ) {
+            _ = AXUIElementSetAttributeValue(
+                focusedElement,
+                kAXFocusedAttribute as CFString,
+                kCFBooleanTrue
+            )
+        }
+        for attempt in 0..<SelectionFocusVerificationPolicy.maximumAttempts {
+            let focusMatches = focusedElementMatches(snapshot)
+            if focusMatches {
+                return true
+            }
+            guard SelectionFocusVerificationPolicy.shouldRetry(
+                afterAttempt: attempt,
+                focusedElementMatches: focusMatches
+            ) else {
+                return false
+            }
+            try? await Task.sleep(
+                nanoseconds: SelectionFocusVerificationPolicy.retryIntervalNanoseconds
+            )
+        }
+        return false
     }
 
-    func placeOnClipboard(_ text: String) {
+    @discardableResult
+    func placeOnClipboard(_ text: String) -> Bool {
         placeOnClipboard(
             RichClipboardPayload(
                 plainText: text,
@@ -59,7 +138,8 @@ final class SelectionService {
         )
     }
 
-    func placeOnClipboard(_ payload: RichClipboardPayload) {
+    @discardableResult
+    func placeOnClipboard(_ payload: RichClipboardPayload) -> Bool {
         payload.write(to: NSPasteboard.general)
     }
 
@@ -73,7 +153,9 @@ final class SelectionService {
         await waitForShortcutModifiersToRelease()
 
         let pasteboard = NSPasteboard.general
-        let backup = PasteboardBackup(pasteboard: pasteboard)
+        guard let backup = await PasteboardBackup.capture(from: pasteboard) else {
+            return false
+        }
         application.activate(options: [.activateIgnoringOtherApps])
         for _ in 0..<20 {
             if NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -89,17 +171,24 @@ final class SelectionService {
             return false
         }
 
-        placeOnClipboard(text)
+        guard placeOnClipboard(text) else {
+            return false
+        }
         try? await Task.sleep(nanoseconds: 25_000_000)
-        await postKey(keyCode: 9, flags: .maskCommand) // V
+        guard await postKey(keyCode: 9, flags: .maskCommand) else { // V
+            _ = backup.restore(to: pasteboard)
+            return false
+        }
         // Most applications consume Paste synchronously, but a short grace
         // period protects controls that read the pasteboard on the next turn.
         try? await Task.sleep(nanoseconds: 220_000_000)
-        backup.restore(to: pasteboard)
-        return true
+        return backup.restore(to: pasteboard)
     }
 
-    func replaceIfUnchanged(_ snapshot: SelectionSnapshot, with result: String) async -> Bool {
+    func replaceIfUnchanged(
+        _ snapshot: SelectionSnapshot,
+        with result: String
+    ) async -> SelectionDeliveryOutcome {
         await replaceIfUnchanged(
             snapshot,
             with: RichClipboardPayload(
@@ -116,66 +205,123 @@ final class SelectionService {
         _ snapshot: SelectionSnapshot,
         with payload: RichClipboardPayload,
         preferAccessibility: Bool = true
-    ) async -> Bool {
-        placeOnClipboard(payload)
+    ) async -> SelectionDeliveryOutcome {
+        guard placeOnClipboard(payload) else {
+            return SelectionDeliveryPolicy.outcome(
+                clipboardWriteSucceeded: false,
+                replacementEligible: false,
+                replacementDispatched: false,
+                verification: .indeterminate
+            )
+        }
 
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         guard frontmostPID == snapshot.processIdentifier else {
-            return false
+            return .copied
         }
 
-        if preferAccessibility, let element = snapshot.accessibilityElement {
-            if let currentText = selectedText(from: element) {
+        if preferAccessibility, let element = snapshot.selectionElement {
+            if let currentText = extractSelectedText(from: element) {
+                let focusMatches = focusedElementMatches(snapshot)
                 guard SelectionReplacementPolicy.shouldReplace(
                     originalText: snapshot.text,
                     currentText: currentText,
                     originalProcessIdentifier: snapshot.processIdentifier,
-                    frontmostProcessIdentifier: frontmostPID
+                    frontmostProcessIdentifier: frontmostPID,
+                    focusedElementMatches: focusMatches
                 ) else {
-                    return false
+                    return .copied
                 }
                 var settable = DarwinBoolean(false)
-                if AXUIElementIsAttributeSettable(
+                let settableResult = AXUIElementIsAttributeSettable(
                     element,
                     kAXSelectedTextAttribute as CFString,
                     &settable
-                ) == .success,
-                   settable.boolValue,
+                )
+                if SelectionReplacementPolicy.shouldUseDirectAccessibilityReplacement(
+                    role: attributeString(kAXRoleAttribute, from: element),
+                    selectedTextSettable: settableResult == .success && settable.boolValue,
+                    applicationBundleIdentifier: snapshot.application?.bundleIdentifier
+                ),
                    AXUIElementSetAttributeValue(
                        element,
                        kAXSelectedTextAttribute as CFString,
                        payload.plainText as CFTypeRef
                    ) == .success
                 {
-                    return true
+                    try? await Task.sleep(nanoseconds: 25_000_000)
+                    let verification = SelectionReplacementPolicy.verifyReplacement(
+                        originalText: snapshot.text,
+                        resultText: payload.plainText,
+                        observedText: extractSelectedText(from: element),
+                        originalProcessIdentifier: snapshot.processIdentifier,
+                        frontmostProcessIdentifier: NSWorkspace.shared
+                            .frontmostApplication?.processIdentifier,
+                        focusedElementMatches: focusedElementMatches(snapshot)
+                    )
+                    switch verification {
+                    case .verified, .indeterminate:
+                        return SelectionDeliveryPolicy.outcome(
+                            clipboardWriteSucceeded: true,
+                            replacementEligible: true,
+                            replacementDispatched: true,
+                            verification: verification
+                        )
+                    case .unchanged:
+                        break
+                    }
                 }
             }
             // Some browser/Electron controls expose the selection during
             // capture but not later. Fall through to a fresh Command-C check.
         }
 
+        guard focusedElementMatches(snapshot) else {
+            return .copied
+        }
         let currentText = await copyUsingKeyboard(
             preserveClipboard: false,
             expectedProcessIdentifier: snapshot.processIdentifier
         )
+        let focusMatchesAfterCopy = focusedElementMatches(snapshot)
         let stillMatches = SelectionReplacementPolicy.shouldReplace(
             originalText: snapshot.text,
             currentText: currentText,
             originalProcessIdentifier: snapshot.processIdentifier,
-            frontmostProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier
+            frontmostProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            focusedElementMatches: focusMatchesAfterCopy
         )
-        placeOnClipboard(payload)
+        guard placeOnClipboard(payload) else {
+            return .clipboardFailed
+        }
         guard stillMatches else {
-            return false
+            return .copied
         }
-        try? await Task.sleep(nanoseconds: 30_000_000)
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier
-                == snapshot.processIdentifier
+                == snapshot.processIdentifier,
+              focusedElementMatches(snapshot)
         else {
-            return false
+            return .copied
         }
-        await postKey(keyCode: 9, flags: .maskCommand) // V
-        return true
+        guard await postKey(keyCode: 9, flags: .maskCommand) else { // V
+            return .copied
+        }
+        try? await Task.sleep(nanoseconds: 120_000_000)
+
+        let verification = SelectionReplacementPolicy.verifyReplacement(
+            originalText: snapshot.text,
+            resultText: payload.plainText,
+            observedText: snapshot.selectionElement.flatMap(extractSelectedText),
+            originalProcessIdentifier: snapshot.processIdentifier,
+            frontmostProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            focusedElementMatches: focusedElementMatches(snapshot)
+        )
+        return SelectionDeliveryPolicy.outcome(
+            clipboardWriteSucceeded: true,
+            replacementEligible: true,
+            replacementDispatched: true,
+            verification: verification
+        )
     }
 
     private func focusedElement(for processIdentifier: pid_t) -> AXUIElement? {
@@ -229,9 +375,26 @@ final class SelectionService {
         return nil
     }
 
-    private func selectedText(from element: AXUIElement) -> String? {
+    private func focusedElementMatches(_ snapshot: SelectionSnapshot) -> Bool {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == snapshot.processIdentifier
+        else {
+            return false
+        }
+        guard let capturedElement = snapshot.focusedElement else {
+            return false
+        }
+        guard let currentElement = focusedElement(for: snapshot.processIdentifier) else {
+            return false
+        }
+        return CFEqual(capturedElement, currentElement)
+    }
+
+    private func accessibilitySelection(
+        from element: AXUIElement
+    ) -> AccessibilitySelection? {
         if let directText = extractSelectedText(from: element) {
-            return directText
+            return AccessibilitySelection(text: directText, element: element)
         }
 
         // Chromium and WebKit browsers (e.g. Safari, Arc, Chrome) or document
@@ -252,12 +415,24 @@ final class SelectionService {
             }
             let parent = (parentValue as! AXUIElement)
             if let parentText = extractSelectedText(from: parent) {
-                return parentText
+                return AccessibilitySelection(text: parentText, element: parent)
             }
             current = parent
         }
 
         return nil
+    }
+
+    private func attributeString(_ attribute: String, from element: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            attribute as CFString,
+            &value
+        ) == .success else {
+            return nil
+        }
+        return value as? String
     }
 
     private func extractSelectedText(from element: AXUIElement) -> String? {
@@ -268,7 +443,7 @@ final class SelectionService {
             &value
         ) == .success,
            let selected = value as? String,
-           !selected.isEmpty
+           SelectionCapturePolicy.containsMeaningfulText(selected)
         {
             return selected
         }
@@ -312,17 +487,16 @@ final class SelectionService {
         guard range.location + range.length <= nsText.length else {
             return nil
         }
-        return nsText.substring(
+        let selected = nsText.substring(
             with: NSRange(location: range.location, length: range.length)
         )
+        return SelectionCapturePolicy.containsMeaningfulText(selected) ? selected : nil
     }
 
     private func copyUsingKeyboard(
         preserveClipboard: Bool,
         expectedProcessIdentifier: pid_t
     ) async -> String? {
-        await waitForShortcutModifiersToRelease()
-
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier
                 == expectedProcessIdentifier
         else {
@@ -338,45 +512,85 @@ final class SelectionService {
         }
 
         let pasteboard = NSPasteboard.general
-        // Always back up the pasteboard so we can restore it if copying fails,
-        // preventing probe marker strings from corrupting user clipboard history.
-        let backup = PasteboardBackup(pasteboard: pasteboard)
-        var shouldRestoreBackup = true
-        defer {
-            if shouldRestoreBackup {
-                backup.restore(to: pasteboard)
+        let backup: PasteboardBackup?
+        if preserveClipboard {
+            guard let captured = await PasteboardBackup.capture(from: pasteboard) else {
+                return nil
             }
+            backup = captured
+        } else {
+            backup = nil
         }
-
-        let marker = "com.susanawang.aishortcuts.copy-probe.\(UUID().uuidString)"
-        pasteboard.clearContents()
-        pasteboard.setString(marker, forType: .string)
-        let markerChangeCount = pasteboard.changeCount
-        await postKey(keyCode: 8, flags: .maskCommand) // C
-
-        // Poll for up to 525ms (35 * 15ms) to accommodate multi-process IPC
-        // latency in web browsers (Safari, Chrome) and Electron apps (ChatGPT, Slack).
+        // Observe Copy without placing a probe value on the user's clipboard.
+        // Chromium may vend copied text lazily; reading that value in-process can
+        // block AppKit for minutes, so a bounded helper process performs the read.
+        var examinedChangeCount = pasteboard.changeCount
+        guard await postKey(keyCode: 8, flags: .maskCommand) else { // C
+            _ = backup?.restore(to: pasteboard)
+            return nil
+        }
+        // Poll long enough for multi-process IPC in browsers and Electron apps.
+        // Each newly published pasteboard generation gets one bounded plain-text read.
+        var capturedText: String?
         for attempt in 0..<35 {
-            if pasteboard.changeCount != markerChangeCount {
-                let copied = pasteboard.string(forType: .string)
-                    ?? (pasteboard.readObjects(forClasses: [NSString.self], options: nil)?.first as? String)
-                if let copied,
-                   copied != marker,
-                   !copied.isEmpty
+            guard !Task.isCancelled else {
+                break
+            }
+            let currentChangeCount = pasteboard.changeCount
+            if currentChangeCount != examinedChangeCount {
+                examinedChangeCount = currentChangeCount
+                if let copied = await stableGeneralPasteboardPlainText(
+                    generation: currentChangeCount,
+                    pasteboard: pasteboard
+                )
                 {
-                    shouldRestoreBackup = preserveClipboard
-                    return copied
+                    capturedText = copied
+                    break
                 }
             }
             if (attempt == 8 || attempt == 18),
                NSWorkspace.shared.frontmostApplication?.processIdentifier
                     == expectedProcessIdentifier
             {
-                await postKey(keyCode: 8, flags: .maskCommand)
+                _ = await postKey(keyCode: 8, flags: .maskCommand)
             }
             try? await Task.sleep(nanoseconds: 15_000_000)
         }
-        return nil
+        guard backup?.restore(to: pasteboard) ?? true else {
+            return nil
+        }
+        return capturedText
+    }
+
+    private func stableGeneralPasteboardPlainText(
+        generation: Int,
+        pasteboard: NSPasteboard
+    ) async -> String? {
+        guard let firstRead = await readGeneralPasteboardPlainText(),
+              SelectionCapturePolicy.containsMeaningfulText(firstRead)
+        else {
+            return nil
+        }
+        try? await Task.sleep(nanoseconds: 15_000_000)
+        guard pasteboard.changeCount == generation,
+              let secondRead = await readGeneralPasteboardPlainText(),
+              pasteboard.changeCount == generation,
+              secondRead == firstRead
+        else {
+            return nil
+        }
+        return firstRead
+    }
+
+    private func readGeneralPasteboardPlainText() async -> String? {
+        guard let data = await BoundedProcessOutput.capture(
+            executableURL: URL(fileURLWithPath: "/usr/bin/pbpaste"),
+            arguments: ["-Prefer", "txt"],
+            timeoutNanoseconds: 650_000_000
+        ) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
     }
 
     private func waitForShortcutModifiersToRelease() async {
@@ -398,15 +612,22 @@ final class SelectionService {
         }
     }
 
-    private func postKey(keyCode: CGKeyCode, flags: CGEventFlags) async {
-        // Use a private event source (stateID: -1) so the synthetic event is isolated
+    private func postKey(keyCode: CGKeyCode, flags: CGEventFlags) async -> Bool {
+        // Use a private event source so the synthetic event is isolated
         // from physical modifier key states in combinedSessionState / hidSystemState.
-        let source = CGEventSource(stateID: CGEventSourceStateID(rawValue: -1)!)
-            ?? CGEventSource(stateID: .hidSystemState)
+        // If the private source is unavailable, wait for the physical modifiers
+        // before falling back to the shared HID event source.
+        let source: CGEventSource?
+        if let isolatedSource = CGEventSource(stateID: .privateState) {
+            source = isolatedSource
+        } else {
+            await waitForShortcutModifiersToRelease()
+            source = CGEventSource(stateID: .hidSystemState)
+        }
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
         else {
-            return
+            return false
         }
         down.flags = flags
         up.flags = flags
@@ -416,33 +637,34 @@ final class SelectionService {
         // properly register the key-down before receiving the key-up.
         try? await Task.sleep(nanoseconds: 12_000_000)
         up.post(tap: .cghidEventTap)
+        return true
     }
 }
 
 private struct PasteboardBackup {
-    private let items: [[NSPasteboard.PasteboardType: Data]]
+    private let snapshot: ClipboardSnapshot
 
-    init(pasteboard: NSPasteboard) {
-        items = (pasteboard.pasteboardItems ?? []).map { item in
-            item.types.reduce(into: [:]) { values, type in
-                if let data = item.data(forType: type) {
-                    values[type] = data
-                }
-            }
+    @MainActor
+    static func capture(from pasteboard: NSPasteboard) async -> PasteboardBackup? {
+        guard let executableURL = Bundle.main.executableURL else {
+            return nil
         }
+        let generation = pasteboard.changeCount
+        guard let data = await BoundedProcessOutput.capture(
+            executableURL: executableURL,
+            arguments: ["--pasteboard-snapshot", pasteboard.name.rawValue],
+            timeoutNanoseconds: 1_250_000_000
+        ), pasteboard.changeCount == generation,
+           let snapshot = ClipboardSnapshot.decode(data)
+        else {
+            return nil
+        }
+        return PasteboardBackup(snapshot: snapshot)
     }
 
-    func restore(to pasteboard: NSPasteboard) {
-        pasteboard.clearContents()
-        let restored = items.map { values -> NSPasteboardItem in
-            let item = NSPasteboardItem()
-            for (type, data) in values {
-                item.setData(data, forType: type)
-            }
-            return item
-        }
-        if !restored.isEmpty {
-            pasteboard.writeObjects(restored)
-        }
+    @MainActor
+    @discardableResult
+    func restore(to pasteboard: NSPasteboard) -> Bool {
+        snapshot.restore(to: pasteboard)
     }
 }

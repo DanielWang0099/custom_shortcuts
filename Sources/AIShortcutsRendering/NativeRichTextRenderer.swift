@@ -21,10 +21,15 @@ public struct RichClipboardPayload: Sendable {
     }
 
     @MainActor
-    public func write(to pasteboard: NSPasteboard) {
-        pasteboard.clearContents()
+    @discardableResult
+    public func write(to pasteboard: NSPasteboard) -> Bool {
+        guard !plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
         let item = NSPasteboardItem()
-        item.setString(plainText, forType: .string)
+        guard item.setString(plainText, forType: .string) else {
+            return false
+        }
         if let htmlData {
             item.setData(htmlData, forType: .html)
         }
@@ -34,7 +39,17 @@ public struct RichClipboardPayload: Sendable {
         if let rtfdData {
             item.setData(rtfdData, forType: .rtfd)
         }
-        pasteboard.writeObjects([item])
+        pasteboard.clearContents()
+        if pasteboard.writeObjects([item]),
+           pasteboard.string(forType: .string) == plainText
+        {
+            return true
+        }
+        // A rich representation may be rejected by a destination pasteboard.
+        // Retain a deterministic plain-text fallback rather than leaving it empty.
+        pasteboard.clearContents()
+        return pasteboard.setString(plainText, forType: .string)
+            && pasteboard.string(forType: .string) == plainText
     }
 }
 
@@ -99,7 +114,21 @@ public final class NativeRichTextRenderer {
         let displayDocument = AIOutputDocumentSanitizer.unwrapOrSanitize(document)
         let builder = RichTextBuilder(theme: theme)
         builder.render(displayDocument)
-        let attributedString = builder.attributedString
+        let attributedString = NSMutableAttributedString(
+            attributedString: builder.attributedString
+        )
+        let terminalBoundary = Self.terminalLineBreaks(in: displayDocument.source)
+        if !terminalBoundary.isEmpty {
+            attributedString.append(
+                NSAttributedString(
+                    string: terminalBoundary,
+                    attributes: [
+                        .font: theme.bodyFont,
+                        .foregroundColor: theme.bodyColor,
+                    ]
+                )
+            )
+        }
         let payload = Self.makeClipboardPayload(
             source: displayDocument.source,
             attributedString: attributedString
@@ -110,6 +139,18 @@ public final class NativeRichTextRenderer {
             hasMathAttachments: builder.hasMathAttachments,
             fallbackMathSources: builder.fallbackMathSources
         )
+    }
+
+    private static func terminalLineBreaks(in source: String) -> String {
+        var start = source.unicodeScalars.endIndex
+        while start > source.unicodeScalars.startIndex {
+            let previous = source.unicodeScalars.index(before: start)
+            guard CharacterSet.newlines.contains(source.unicodeScalars[previous]) else {
+                break
+            }
+            start = previous
+        }
+        return String(source[start..<source.endIndex])
     }
 
     private static func makeClipboardPayload(
@@ -363,6 +404,11 @@ private final class RichTextBuilder {
         var index = start
         var orderedIndex = 1
         while index < lines.count, let parts = listParts(in: lines[index]) {
+            let expanded = expandedListItemText(
+                parts.text,
+                after: index,
+                in: lines
+            )
             let paragraph = NSMutableParagraphStyle()
             paragraph.headIndent = 24
             paragraph.firstLineHeadIndent = 4
@@ -382,7 +428,7 @@ private final class RichTextBuilder {
                 )
             )
             let endsWithDisplayBlock = appendInline(
-                parts.text,
+                expanded.text,
                 style: InlineStyle(
                     font: theme.bodyFont,
                     color: theme.bodyColor,
@@ -395,9 +441,34 @@ private final class RichTextBuilder {
             if parts.marker.last == "." {
                 orderedIndex += 1
             }
-            index += 1
+            index = expanded.nextIndex
         }
         return index
+    }
+
+    private func expandedListItemText(
+        _ firstLine: String,
+        after lineIndex: Int,
+        in lines: [String]
+    ) -> (text: String, nextIndex: Int) {
+        let firstNextIndex = lineIndex + 1
+        guard MathSyntax.hasUnclosedMathDelimiter(in: firstLine) else {
+            return (firstLine, firstNextIndex)
+        }
+
+        var candidate = firstLine
+        var scanIndex = firstNextIndex
+        while scanIndex < lines.count,
+              listParts(in: lines[scanIndex]) == nil
+        {
+            candidate += "\n" + lines[scanIndex]
+            scanIndex += 1
+            if !MathSyntax.hasUnclosedMathDelimiter(in: candidate) {
+                return (candidate, scanIndex)
+            }
+        }
+
+        return (firstLine, firstNextIndex)
     }
 
     private func renderQuote(

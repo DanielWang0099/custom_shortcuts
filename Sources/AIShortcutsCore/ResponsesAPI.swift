@@ -510,7 +510,7 @@ public struct ResponsesAPIClient: Sendable {
                         ],
                         "explanation": [
                             "type": "string",
-                            "description": "Clear explanation of the concept or text using markdown formatting where helpful.",
+                            "description": "Clear explanation of the concept or text using Markdown where helpful. In decoded Markdown, LaTeX delimiters and commands contain exactly one backslash.",
                         ],
                     ],
                     "required": ["format", "explanation"],

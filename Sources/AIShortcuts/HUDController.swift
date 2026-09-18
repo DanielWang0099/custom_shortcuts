@@ -10,7 +10,7 @@ final class HUDController {
     }
 
     @MainActor
-    private enum Tone {
+    private enum Tone: Equatable {
         case success
         case busy
         case warning
@@ -28,7 +28,11 @@ final class HUDController {
     }
 
     private var panel: NSPanel?
+    private var compactPanel: NSPanel?
+    private var compactLabel: NSTextField?
+    private var compactImageView: NSImageView?
     private var generation = 0
+    private var isBusyPresentation = false
     private var dismissOnMouseExit = false
     private var mouseExitPoller: DispatchSourceTimer?
 
@@ -36,11 +40,57 @@ final class HUDController {
         panel?.isVisible ?? false
     }
 
+    func prepare() {
+        guard compactPanel == nil else {
+            return
+        }
+        let hudPanel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 126, height: 44),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        hudPanel.level = .statusBar
+        hudPanel.isOpaque = false
+        hudPanel.backgroundColor = .clear
+        hudPanel.hasShadow = true
+        hudPanel.appearance = NSAppearance(named: .darkAqua)
+        hudPanel.ignoresMouseEvents = true
+        hudPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+
+        let background = NSView(frame: hudPanel.contentView?.bounds ?? .zero)
+        background.autoresizingMask = [.width, .height]
+        ShortcutUIStyle.configurePanelSurface(
+            background,
+            cornerRadius: ShortcutUIStyle.hudCornerRadius
+        )
+        let imageView = NSImageView(frame: NSRect(x: 14, y: 13, width: 18, height: 18))
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = ShortcutUIStyle.primaryTextColor
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.cell?.isScrollable = false
+        background.addSubview(imageView)
+        background.addSubview(label)
+        hudPanel.contentView = background
+
+        compactPanel = hudPanel
+        compactLabel = label
+        compactImageView = imageView
+    }
+
     func dismiss() {
         generation &+= 1
+        isBusyPresentation = false
         stopMouseExitDismissal()
         panel?.orderOut(nil)
         panel = nil
+    }
+
+    func dismissBusy() {
+        guard isBusyPresentation else { return }
+        dismiss()
     }
 
     func showSuccess(text: String? = nil) {
@@ -102,8 +152,20 @@ final class HUDController {
     ) {
         generation += 1
         let thisGeneration = generation
+        isBusyPresentation = tone == .busy
         stopMouseExitDismissal()
         panel?.orderOut(nil)
+
+        if presentation == .compact {
+            showCompact(
+                symbolName: symbolName,
+                message: text ?? "",
+                tone: tone,
+                duration: duration,
+                generation: thisGeneration
+            )
+            return
+        }
 
         let message = text ?? rendered?.clipboardPayload.plainText ?? ""
         let label = NSTextField(labelWithString: message)
@@ -248,6 +310,7 @@ final class HUDController {
                 }
                 hudPanel?.orderOut(nil)
                 self.panel = nil
+                self.isBusyPresentation = false
             }
         } else {
             beginMouseExitDismissal(
@@ -255,6 +318,57 @@ final class HUDController {
                 hudPanel: hudPanel,
                 initialMouseLocation: mouse
             )
+        }
+    }
+
+    private func showCompact(
+        symbolName: String,
+        message: String,
+        tone: Tone,
+        duration: TimeInterval?,
+        generation thisGeneration: Int
+    ) {
+        prepare()
+        guard let hudPanel = compactPanel,
+              let label = compactLabel,
+              let imageView = compactImageView
+        else {
+            return
+        }
+
+        label.stringValue = message
+        label.setAccessibilityLabel(message)
+        label.sizeToFit()
+        let hasText = !message.isEmpty
+        let width = hasText ? min(460, max(126, label.frame.width + 62)) : 48
+        hudPanel.setContentSize(NSSize(width: width, height: 44))
+        label.frame = NSRect(x: 44, y: 13, width: max(0, width - 58), height: 18)
+        label.isHidden = !hasText
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+        imageView.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(symbolConfig)
+        imageView.contentTintColor = tone.accentColor
+
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) })
+            ?? NSScreen.main
+        let visible = screen?.visibleFrame
+            ?? NSRect(x: mouse.x, y: mouse.y, width: width, height: 44)
+        let x = min(max(mouse.x - width / 2, visible.minX + 8), visible.maxX - width - 8)
+        let y = min(max(mouse.y + 24, visible.minY + 8), visible.maxY - 44 - 8)
+        hudPanel.setFrameOrigin(NSPoint(x: x, y: y))
+        hudPanel.orderFrontRegardless()
+        panel = hudPanel
+
+        if let duration {
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self, weak hudPanel] in
+                guard let self, self.generation == thisGeneration else {
+                    return
+                }
+                hudPanel?.orderOut(nil)
+                self.panel = nil
+                self.isBusyPresentation = false
+            }
         }
     }
 
