@@ -120,6 +120,7 @@ enum ShortcutUIStyle {
         case 37: key = "L"
         case 8: key = "C"
         case 34: key = "I"
+        case 44: key = "/"
         default: key = "?"
         }
         return "⌃⌥⌘\(key)"

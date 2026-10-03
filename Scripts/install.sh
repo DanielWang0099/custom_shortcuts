@@ -125,7 +125,7 @@ plutil -insert LSMinimumSystemVersion -string "13.0" "${INFO_PLIST}"
 plutil -insert LSUIElement -bool true "${INFO_PLIST}"
 plutil -insert NSHighResolutionCapable -bool true "${INFO_PLIST}"
 plutil -insert NSPrincipalClass -string "NSApplication" "${INFO_PLIST}"
-plutil -insert NSAppleEventsUsageDescription -string "AI Shortcuts asks Finder for the selected file or folder so it can copy the complete POSIX path." "${INFO_PLIST}"
+plutil -insert NSAppleEventsUsageDescription -string "AI Shortcuts opens or resumes ChatGPT voice in Chrome and asks Finder for the selected file or folder to copy its complete POSIX path." "${INFO_PLIST}"
 plutil -insert NSScreenCaptureUsageDescription -string "AI Shortcuts captures only the screen region you select for AI OCR." "${INFO_PLIST}"
 
 codesign --force --deep --sign - --identifier "${BUNDLE_ID}" "${APP_PATH}"

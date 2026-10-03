@@ -209,7 +209,7 @@ public enum AIOutputPolicy {
                 : [.plainText]
         case .explain, .calculate:
             return [.plainText, .markdown]
-        case .finderPath, .inputLock, .clipboardQueue, .insert:
+        case .finderPath, .inputLock, .clipboardQueue, .insert, .chatgptVoice:
             return [.plainText]
         }
     }

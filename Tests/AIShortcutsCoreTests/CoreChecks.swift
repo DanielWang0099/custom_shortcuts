@@ -37,6 +37,7 @@ struct CoreChecks {
         failures += await run("calculate result presentation", calculateResultPresentationChecks)
         failures += await run("calculate result dismissal", calculateResultDismissalChecks)
         failures += await run("explanation conversation memory", explanationMemoryChecks)
+        failures += await run("Chrome voice session policy", chromeVoiceSessionChecks)
         failures += await run("sequential clipboard FIFO", sequentialClipboardChecks)
         failures += await run("sequential clipboard cross-window capture", sequentialClipboardCaptureChecks)
         failures += await run("sequential clipboard single press", sequentialClipboardSinglePressChecks)
@@ -525,6 +526,7 @@ struct CoreChecks {
                 .init(action: .inputLock, virtualKeyCode: 37),
                 .init(action: .clipboardQueue, virtualKeyCode: 8),
                 .init(action: .insert, virtualKeyCode: 34),
+                .init(action: .chatgptVoice, virtualKeyCode: 44),
             ],
             "Global shortcut mappings changed."
         )
@@ -572,14 +574,38 @@ struct CoreChecks {
                         && $0 != .inputLock
                         && $0 != .clipboardQueue
                         && $0 != .insert
+                        && $0 != .chatgptVoice
                 }
                 .allSatisfy(\.requiresOpenAI)
                 && !AIShortcutAction.finderPath.requiresOpenAI
                 && !AIShortcutAction.inputLock.requiresOpenAI
                 && !AIShortcutAction.clipboardQueue.requiresOpenAI
                 && !AIShortcutAction.insert.requiresOpenAI
+                && !AIShortcutAction.chatgptVoice.requiresOpenAI
                 && AIShortcutAction.insert.requiresAccessibility,
             "Local and hybrid shortcuts lost their permission/API contract."
+        )
+        try expect(
+            AIShortcutAction.chatgptVoice.rawValue == 11
+                && AIShortcutAction.chatgptVoice.displayName == "ChatGPT Voice"
+                && AIShortcutAction.chatgptVoice.requiresAccessibility
+                && !AIShortcutAction.chatgptVoice.requiresAIProvider
+                && !AIShortcutAction.chatgptVoice.requiresScreenRecording
+                && !SelectionReplacementPolicy.shouldAttemptReplacement(for: .chatgptVoice),
+            "ChatGPT Voice must retain its stable ID and Accessibility-only local action contract."
+        )
+        try expect(
+            Set(HotKeyDefinition.defaults.map(\.action)) == Set(AIShortcutAction.allCases)
+                && Set(HotKeyDefinition.defaults.map(\.virtualKeyCode)).count
+                    == HotKeyDefinition.defaults.count,
+            "Each action must have exactly one distinct default key."
+        )
+        let voice = PromptBuilder.make(action: .chatgptVoice)
+        try expect(
+            voice.instructions.isEmpty && voice.inputText.isEmpty
+                && voice.maxOutputTokens == 0 && voice.outputSchema == nil
+                && voice.allowedOutputFormats.isEmpty,
+            "ChatGPT Voice must not build an AI prompt."
         )
 
         let refine = PromptBuilder.make(

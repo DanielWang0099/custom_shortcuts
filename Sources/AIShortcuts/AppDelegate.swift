@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var welcomeWindowStorage: WelcomeWindowController?
     private var inputLockServiceStorage: InputLockService?
     private var clipboardQueueServiceStorage: ClipboardQueueService?
+    private var chromeVoiceServiceStorage: ChromeVoiceSessionService?
 
     private var hotKeyManager: HotKeyManager?
     private var promptPanel: PromptPanelController?
@@ -93,6 +94,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let service = FinderSelectionService()
         finderServiceStorage = service
+        return service
+    }
+
+    private var chromeVoiceService: ChromeVoiceSessionService {
+        if let chromeVoiceServiceStorage {
+            return chromeVoiceServiceStorage
+        }
+        let service = ChromeVoiceSessionService()
+        chromeVoiceServiceStorage = service
         return service
     }
 
@@ -311,6 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         inputLockIndicatorStorage?.dismiss()
         clipboardQueueServiceStorage?.deactivate(notify: false)
         clipboardQueueIndicatorStorage?.dismiss()
+        chromeVoiceServiceStorage?.invalidate()
 
         if !isUserIntentionalQuit && (screenRecordingRequestIssuedThisRun || accessibilityRequestIssuedThisRun) {
             logger.notice("Relaunching AI Shortcuts following privacy permission update.")
@@ -373,6 +384,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = inputLockIndicator
         _ = clipboardQueueService
         _ = clipboardQueueIndicator
+        _ = chromeVoiceService
         _ = modelSettings
         _ = shortcutGuide
         let milliseconds = Int(Date().timeIntervalSince(start) * 1_000)
@@ -419,6 +431,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             _ = selectionService
             _ = insertLibrary
             _ = insertPanel
+        case .chatgptVoice:
+            _ = chromeVoiceService
         }
     }
 
@@ -996,6 +1010,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
                 await self?.runFinderPath()
             }
+        case .chatgptVoice:
+            let generation = operationGeneration
+            activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
+                await self?.runChatGPTVoice(generation: generation)
+            }
         case .inputLock:
             break
         case .clipboardQueue:
@@ -1028,6 +1047,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 if action == .insert, insertPanelStorage?.isVisible == true {
                     insertPanelStorage?.dismiss()
+                }
+                if action == .chatgptVoice {
+                    chromeVoiceServiceStorage?.invalidate()
                 }
             }
 
@@ -1323,6 +1345,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             handleOperationError(error, action: .calculate)
+        }
+    }
+
+    private func runChatGPTVoice(generation: Int) async {
+        // A cancelled launch can finish after another shortcut has started.
+        // Only this operation may release its own busy state or show feedback.
+        defer {
+            if operationGeneration == generation, currentAction == .chatgptVoice {
+                finishOperation()
+            }
+        }
+        do {
+            let outcome = try await chromeVoiceService.startOrResume()
+            guard !Task.isCancelled,
+                  operationGeneration == generation,
+                  currentAction == .chatgptVoice else {
+                return
+            }
+            let message: String
+            switch outcome {
+            case .startedNew:
+                message = "ChatGPT voice started · new chat"
+            case .resumed:
+                message = "ChatGPT voice resumed"
+            case .alreadyActive:
+                message = "ChatGPT voice is already active"
+            }
+            hud.showSuccess(text: message)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled,
+                  operationGeneration == generation,
+                  currentAction == .chatgptVoice else {
+                return
+            }
+            if let voiceError = error as? ChromeVoiceError,
+               case .automationDenied = voiceError {
+                requestAutomationPermission(openSettings: true)
+                hud.showError("Chrome access is off · Privacy & Security → Automation")
+            } else {
+                hud.showError(error.localizedDescription)
+            }
         }
     }
 

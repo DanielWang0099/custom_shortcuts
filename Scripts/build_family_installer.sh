@@ -58,7 +58,7 @@ INFO_PLIST="${CONTENTS_PATH}/Info.plist"
 /usr/bin/plutil -insert NSHighResolutionCapable -bool true "${INFO_PLIST}"
 /usr/bin/plutil -insert NSPrincipalClass -string "NSApplication" "${INFO_PLIST}"
 /usr/bin/plutil -insert NSAppleEventsUsageDescription -string \
-    "AI Shortcuts asks Finder for the selected file or folder so it can copy the complete POSIX path." "${INFO_PLIST}"
+    "AI Shortcuts opens or resumes ChatGPT voice in Chrome and asks Finder for the selected file or folder to copy its complete POSIX path." "${INFO_PLIST}"
 /usr/bin/plutil -insert NSScreenCaptureUsageDescription -string \
     "AI Shortcuts captures only the screen region you select for AI OCR and Calculate." "${INFO_PLIST}"
 

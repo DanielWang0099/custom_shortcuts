@@ -11,6 +11,7 @@ public enum AIShortcutAction: UInt32, CaseIterable, Sendable {
     case inputLock = 8
     case clipboardQueue = 9
     case insert = 10
+    case chatgptVoice = 11
 
     public var displayName: String {
         switch self {
@@ -24,6 +25,7 @@ public enum AIShortcutAction: UInt32, CaseIterable, Sendable {
         case .inputLock: "Input Lock"
         case .clipboardQueue: "Clipboard Queue"
         case .insert: "Insert"
+        case .chatgptVoice: "ChatGPT Voice"
         }
     }
 
@@ -32,6 +34,7 @@ public enum AIShortcutAction: UInt32, CaseIterable, Sendable {
             || self == .inputLock
             || self == .clipboardQueue
             || self == .insert
+            || self == .chatgptVoice
     }
 
     public var requiresScreenRecording: Bool {
@@ -48,7 +51,7 @@ public enum AIShortcutAction: UInt32, CaseIterable, Sendable {
 
     public var requiresAIProvider: Bool {
         self != .finderPath && self != .inputLock && self != .clipboardQueue
-            && self != .insert
+            && self != .insert && self != .chatgptVoice
     }
 }
 
@@ -61,7 +64,7 @@ public struct HotKeyDefinition: Equatable, Sendable {
         self.virtualKeyCode = virtualKeyCode
     }
 
-    // ANSI keyboard virtual key codes: 4, R, T, F, \, E, =, L, C, I.
+    // ANSI keyboard virtual key codes: 4, R, T, F, \, E, =, L, C, I, /.
     public static let defaults: [HotKeyDefinition] = [
         .init(action: .ocr, virtualKeyCode: 21),
         .init(action: .refine, virtualKeyCode: 15),
@@ -73,6 +76,7 @@ public struct HotKeyDefinition: Equatable, Sendable {
         .init(action: .inputLock, virtualKeyCode: 37),
         .init(action: .clipboardQueue, virtualKeyCode: 8),
         .init(action: .insert, virtualKeyCode: 34),
+        .init(action: .chatgptVoice, virtualKeyCode: 44),
     ]
 }
 
@@ -330,6 +334,13 @@ public enum PromptBuilder {
         case .insert:
             return PromptSpec(
                 action: .insert,
+                instructions: "",
+                inputText: "",
+                maxOutputTokens: 0
+            )
+        case .chatgptVoice:
+            return PromptSpec(
+                action: .chatgptVoice,
                 instructions: "",
                 inputText: "",
                 maxOutputTokens: 0

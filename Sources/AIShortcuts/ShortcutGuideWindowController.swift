@@ -240,6 +240,12 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
                 "Result · Pastes into the original field and restores your clipboard; only ambiguous key labels use AI.",
                 "Accessibility; configured provider only for smart matching"
             )
+        case .chatgptVoice:
+            return (
+                "Open ChatGPT in Chrome and start voice using its named Accessibility button.",
+                "Result · Resumes this shortcut's chat within 30 minutes of voice inactivity; an active call stays eligible. If an ended call leaves no voice button, reloads the same chat once before retrying. Missing tabs, Chrome restarts, or expired idle sessions start a fresh chat. App restart clears tracking.",
+                "Accessibility + Chrome Automation + ChatGPT sign-in and browser microphone permission; no AI provider or Screen Recording required"
+            )
         }
     }
 
