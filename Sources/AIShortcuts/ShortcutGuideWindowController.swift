@@ -246,6 +246,12 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
                 "Result · Resumes this shortcut's chat within 30 minutes of voice inactivity; an active call stays eligible. If an ended call leaves no voice button, reloads the same chat once before retrying. Missing tabs, Chrome restarts, or expired idle sessions start a fresh chat. App restart clears tracking.",
                 "Accessibility + Chrome Automation + ChatGPT sign-in and browser microphone permission; no AI provider or Screen Recording required"
             )
+        case .dictionary:
+            return (
+                "Look up a selected word, drag over text to inspect it, or type a word or phrase manually.",
+                "Result · Shows native definitions immediately, with optional target-language translation and focused AI enrichment when configured; visited entries stay available in the panel.",
+                "Selection capture uses Accessibility when available; screen fallback uses Screen Recording; typed lookup works without either permission or an AI provider"
+            )
         }
     }
 

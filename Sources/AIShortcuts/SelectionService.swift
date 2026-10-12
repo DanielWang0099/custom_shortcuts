@@ -583,10 +583,12 @@ final class SelectionService {
     }
 
     private func readGeneralPasteboardPlainText() async -> String? {
+        // pbpaste follows the inherited locale, and its output is decoded as UTF-8 below.
         guard let data = await BoundedProcessOutput.capture(
             executableURL: URL(fileURLWithPath: "/usr/bin/pbpaste"),
             arguments: ["-Prefer", "txt"],
-            timeoutNanoseconds: 650_000_000
+            timeoutNanoseconds: 650_000_000,
+            environmentOverrides: ["LC_ALL": "en_US.UTF-8"]
         ) else {
             return nil
         }

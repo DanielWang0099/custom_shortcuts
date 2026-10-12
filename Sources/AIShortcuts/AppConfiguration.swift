@@ -6,7 +6,6 @@ enum AppConfiguration {
     static let keychainService = "com.susanawang.aishortcuts.openai"
     static let anthropicKeychainService = "com.susanawang.aishortcuts.anthropic"
     static let keychainAccount = "default"
-    static let launchAgentLabel = "com.susanawang.aishortcuts"
 
     static var bootstrapKeyURL: URL {
         let support = (try? FileManager.default.url(

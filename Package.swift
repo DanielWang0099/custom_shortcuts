@@ -36,6 +36,10 @@ let package = Package(
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("Security"),
                 .linkedFramework("WebKit"),
+                .linkedFramework("CoreServices"),
+                .linkedFramework("NaturalLanguage"),
+                .linkedFramework("Vision"),
+                .linkedFramework("AVFoundation"),
             ]
         ),
         .executableTarget(

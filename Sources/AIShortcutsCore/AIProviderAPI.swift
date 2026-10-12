@@ -121,6 +121,125 @@ public struct AIProviderClient: Sendable {
         }
     }
 
+    /// Builds a typed dictionary request for an OpenAI-compatible or
+    /// Anthropic endpoint. The dictionary schema is intentionally separate
+    /// from the regular shortcut output schemas so adding it cannot alter
+    /// existing `complete()` requests.
+    public func makeDictionaryRequest(
+        request dictionaryRequest: DictionaryAIRequest,
+        apiKey: String,
+        safetyIdentifier: String,
+        configuration: AIProviderConfiguration
+    ) throws -> URLRequest {
+        guard configuration.validationMessage == nil,
+              dictionaryRequest.validationMessage == nil
+        else {
+            throw ResponsesAPIError.invalidRequest
+        }
+
+        let body: [String: Any]
+        switch configuration.provider {
+        case .openAICompatible:
+            body = openAICompatibleDictionaryBody(
+                request: dictionaryRequest,
+                configuration: configuration
+            )
+        case .anthropic:
+            body = anthropicDictionaryBody(
+                request: dictionaryRequest,
+                configuration: configuration
+            )
+        }
+
+        let encoded: Data
+        do {
+            encoded = try JSONSerialization.data(withJSONObject: body)
+        } catch {
+            throw ResponsesAPIError.invalidRequest
+        }
+
+        var urlRequest = URLRequest(url: configuration.endpoint)
+        urlRequest.httpMethod = "POST"
+        urlRequest.timeoutInterval = 60
+        urlRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        urlRequest.networkServiceType = .responsiveData
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        switch configuration.provider {
+        case .openAICompatible:
+            urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        case .anthropic:
+            urlRequest.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            urlRequest.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        }
+        urlRequest.httpBody = encoded
+        _ = safetyIdentifier
+        return urlRequest
+    }
+
+    /// Requests one of the two deliberately small dictionary AI contracts:
+    /// sentence translation/context, or focused entry enrichment.
+    public func completeDictionary(
+        request dictionaryRequest: DictionaryAIRequest,
+        apiKey: String,
+        safetyIdentifier: String,
+        configuration: AIProviderConfiguration
+    ) async throws -> DictionaryAIResponse {
+        let urlRequest = try makeDictionaryRequest(
+            request: dictionaryRequest,
+            apiKey: apiKey,
+            safetyIdentifier: safetyIdentifier,
+            configuration: configuration
+        )
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await transport.data(for: urlRequest)
+        } catch {
+            guard NetworkRetryPolicy.shouldRetry(error), !Task.isCancelled else {
+                throw error
+            }
+            try await Task.sleep(for: .milliseconds(120))
+            (data, response) = try await transport.data(for: urlRequest)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw ResponsesAPIError.invalidHTTPResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw ResponsesAPIError.httpStatus(http.statusCode, parseAPIErrorMessage(from: data))
+        }
+
+        let text: String
+        switch configuration.provider {
+        case .openAICompatible:
+            text = try parseOpenAICompatibleCompletion(
+                from: data,
+                fallbackModel: configuration.model,
+                outputSchema: nil,
+                allowedOutputFormats: []
+            ).text
+        case .anthropic:
+            text = try parseAnthropicCompletion(
+                from: data,
+                fallbackModel: configuration.model,
+                outputSchema: nil,
+                allowedOutputFormats: []
+            ).text
+        }
+
+        let responseData = AIOutputDocumentSanitizer.extractJSONPayload(from: text) ?? Data(text.utf8)
+        let dictionaryResponse: DictionaryAIResponse
+        do {
+            dictionaryResponse = try JSONDecoder().decode(DictionaryAIResponse.self, from: responseData)
+        } catch {
+            throw ResponsesAPIError.invalidOutput(
+                "The AI provider returned an invalid dictionary answer."
+            )
+        }
+        try validateDictionaryResponse(dictionaryResponse, for: dictionaryRequest)
+        return dictionaryResponse
+    }
+
     private func openAICompatibleBody(
         prompt: PromptSpec,
         imagePNGs: [Data],
@@ -223,6 +342,232 @@ public struct AIProviderClient: Sendable {
             }
         }
         return body
+    }
+
+    private func openAICompatibleDictionaryBody(
+        request: DictionaryAIRequest,
+        configuration: AIProviderConfiguration
+    ) -> [String: Any] {
+        [
+            "model": configuration.model,
+            "messages": [
+                [
+                    "role": "system",
+                    "content": request.promptInstructions,
+                ],
+                [
+                    "role": "user",
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": request.promptInputText,
+                        ],
+                    ],
+                ],
+            ],
+            "max_completion_tokens": request.maxOutputTokens,
+            "response_format": [
+                "type": "json_schema",
+                "json_schema": Self.dictionaryTextFormat(),
+            ],
+        ]
+    }
+
+    private func anthropicDictionaryBody(
+        request: DictionaryAIRequest,
+        configuration: AIProviderConfiguration
+    ) -> [String: Any] {
+        let format = Self.dictionaryTextFormat()
+        return [
+            "model": configuration.model,
+            "max_tokens": request.maxOutputTokens,
+            "system": request.promptInstructions,
+            "messages": [
+                [
+                    "role": "user",
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": request.promptInputText,
+                        ],
+                    ],
+                ],
+            ],
+            "output_config": [
+                "format": [
+                    "type": "json_schema",
+                    "schema": format["schema"] as Any,
+                ],
+            ],
+        ]
+    }
+
+    private static func dictionaryTextFormat() -> [String: Any] {
+        [
+            "name": "dictionary_response",
+            "strict": true,
+            "schema": [
+                "type": "object",
+                "properties": [
+                    "kind": [
+                        "type": "string",
+                        "enum": ["sentence_context", "entry_enrichment"],
+                    ],
+                    "translation": [
+                        "type": ["string", "null"],
+                    ],
+                    "segmentation": [
+                        "type": "array",
+                        "items": [
+                            "type": "object",
+                            "properties": [
+                                "text": [
+                                    "type": "string",
+                                    "minLength": 1,
+                                ],
+                                "start_utf16": [
+                                    "type": "integer",
+                                    "minimum": 0,
+                                ],
+                                "length_utf16": [
+                                    "type": "integer",
+                                    "minimum": 1,
+                                ],
+                                "language": [
+                                    "type": ["string", "null"],
+                                ],
+                            ],
+                            "required": ["text", "start_utf16", "length_utf16", "language"],
+                            "additionalProperties": false,
+                        ],
+                        "maxItems": 128,
+                    ],
+                    "readings": [
+                        "type": "array",
+                        "items": ["type": "string"],
+                        "maxItems": 16,
+                    ],
+                    "contextual_meaning": [
+                        "type": ["string", "null"],
+                    ],
+                    "target_definitions": [
+                        "type": "array",
+                        "items": ["type": "string"],
+                        "maxItems": 8,
+                    ],
+                    "example_translations": [
+                        "type": "array",
+                        "items": [
+                            "type": "object",
+                            "properties": [
+                                "source": ["type": "string"],
+                                "translation": ["type": "string"],
+                            ],
+                            "required": ["source", "translation"],
+                            "additionalProperties": false,
+                        ],
+                        "maxItems": 2,
+                    ],
+                ],
+                "required": [
+                    "kind",
+                    "translation",
+                    "segmentation",
+                    "readings",
+                    "contextual_meaning",
+                    "target_definitions",
+                    "example_translations",
+                ],
+                "additionalProperties": false,
+            ],
+        ]
+    }
+
+    private func validateDictionaryResponse(
+        _ response: DictionaryAIResponse,
+        for request: DictionaryAIRequest
+    ) throws {
+        guard response.kind == request.kind else {
+            throw ResponsesAPIError.invalidOutput(
+                "The AI provider returned the wrong dictionary response kind."
+            )
+        }
+        switch request {
+        case let .sentenceContext(sentenceRequest):
+            guard let translation = response.translation,
+                  !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw ResponsesAPIError.invalidOutput(
+                    "The AI provider returned no sentence translation."
+                )
+            }
+            guard response.contextualMeaning == nil,
+                  response.targetDefinitions.isEmpty,
+                  response.exampleTranslations.isEmpty
+            else {
+                throw ResponsesAPIError.invalidOutput(
+                    "The sentence dictionary response contained entry-enrichment fields."
+                )
+            }
+            try validateDictionaryTokens(response.segmentedTokens, within: sentenceRequest.sourceText)
+            if !sentenceRequest.includeSegmentation, !response.segmentedTokens.isEmpty {
+                throw ResponsesAPIError.invalidOutput(
+                    "The AI provider returned segmentation that was not requested."
+                )
+            }
+            if !sentenceRequest.includeReadings, !response.readings.isEmpty {
+                throw ResponsesAPIError.invalidOutput(
+                    "The AI provider returned readings that were not requested."
+                )
+            }
+        case let .entryEnrichment(entryRequest):
+            guard let meaning = response.contextualMeaning,
+                  !meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw ResponsesAPIError.invalidOutput(
+                    "The AI provider returned no contextual dictionary meaning."
+                )
+            }
+            guard response.translation == nil, response.segmentedTokens.isEmpty else {
+                throw ResponsesAPIError.invalidOutput(
+                    "The entry dictionary response contained sentence-translation fields."
+                )
+            }
+            guard response.exampleTranslations.count <= 2 else {
+                throw ResponsesAPIError.invalidOutput(
+                    "The AI provider returned more than two example translations."
+                )
+            }
+            try validateDictionaryTokens(response.segmentedTokens, within: entryRequest.sentence)
+        }
+    }
+
+    private func validateDictionaryTokens(
+        _ tokens: [DictionaryToken],
+        within source: String
+    ) throws {
+        let sourceLength = (source as NSString).length
+        var previousEnd = 0
+        for token in tokens {
+            guard token.sourceRange.location >= 0,
+                  token.sourceRange.length > 0,
+                  token.sourceRange.location <= sourceLength,
+                  token.sourceRange.length <= sourceLength - token.sourceRange.location,
+                  token.sourceRange.location >= previousEnd,
+                  !token.text.isEmpty
+            else {
+                throw ResponsesAPIError.invalidOutput(
+                    "The AI provider returned an invalid token range."
+                )
+            }
+            let sourceToken = (source as NSString).substring(with: token.sourceRange)
+            guard sourceToken == token.text else {
+                throw ResponsesAPIError.invalidOutput(
+                    "The AI provider returned token text that does not match its UTF-16 range."
+                )
+            }
+            previousEnd = token.sourceRange.location + token.sourceRange.length
+        }
     }
 
     private func parseOpenAICompatibleCompletion(

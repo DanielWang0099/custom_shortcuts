@@ -5,7 +5,8 @@ public enum BoundedProcessOutput {
     public static func capture(
         executableURL: URL,
         arguments: [String] = [],
-        timeoutNanoseconds: UInt64
+        timeoutNanoseconds: UInt64,
+        environmentOverrides: [String: String] = [:]
     ) async -> Data? {
         guard timeoutNanoseconds > 0 else {
             return nil
@@ -31,6 +32,12 @@ public enum BoundedProcessOutput {
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = outputHandle
         process.standardError = FileHandle.nullDevice
+        if !environmentOverrides.isEmpty {
+            process.environment = ProcessInfo.processInfo.environment.merging(
+                environmentOverrides,
+                uniquingKeysWith: { _, override in override }
+            )
+        }
 
         do {
             try process.run()

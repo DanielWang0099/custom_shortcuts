@@ -59,13 +59,6 @@ enum ShortcutUIStyle {
         blue: 0.430,
         alpha: 1
     )
-    static let userBubbleColor = NSColor(
-        srgbRed: 0.155,
-        green: 0.150,
-        blue: 0.205,
-        alpha: 1
-    )
-    static let userBubbleBorderColor = accentColor.withAlphaComponent(0.34)
     static let panelBorderColor = NSColor.white.withAlphaComponent(0.12)
     static let contentBorderColor = NSColor.white.withAlphaComponent(0.10)
     static let focusBorderColor = accentColor.withAlphaComponent(0.72)
@@ -78,20 +71,6 @@ enum ShortcutUIStyle {
         view.layer?.cornerRadius = cornerRadius
         view.layer?.masksToBounds = true
         view.layer?.backgroundColor = shellColor.cgColor
-        view.layer?.borderWidth = 1
-        view.layer?.borderColor = panelBorderColor.cgColor
-    }
-
-    static func configureMaterialSurface(
-        _ view: NSVisualEffectView,
-        cornerRadius: CGFloat
-    ) {
-        view.material = .hudWindow
-        view.blendingMode = .behindWindow
-        view.state = .active
-        view.appearance = NSAppearance(named: .darkAqua)
-        view.wantsLayer = true
-        view.layer?.cornerRadius = cornerRadius
         view.layer?.borderWidth = 1
         view.layer?.borderColor = panelBorderColor.cgColor
     }
@@ -121,6 +100,7 @@ enum ShortcutUIStyle {
         case 8: key = "C"
         case 34: key = "I"
         case 44: key = "/"
+        case 2: key = "D"
         default: key = "?"
         }
         return "⌃⌥⌘\(key)"

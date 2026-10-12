@@ -4,21 +4,15 @@ import CoreGraphics
 @MainActor
 enum AIShortcutsLogo {
     private static let graphite = NSColor(
-        srgbRed: 0.105,
-        green: 0.110,
-        blue: 0.125,
+        srgbRed: 27 / 255,
+        green: 28 / 255,
+        blue: 32 / 255,
         alpha: 1
     )
     private static let purple = NSColor(
-        srgbRed: 0.500,
-        green: 0.455,
-        blue: 0.985,
-        alpha: 1
-    )
-    private static let lilac = NSColor(
-        srgbRed: 0.690,
-        green: 0.655,
-        blue: 1.000,
+        srgbRed: 128 / 255,
+        green: 116 / 255,
+        blue: 251 / 255,
         alpha: 1
     )
 
@@ -31,13 +25,17 @@ enum AIShortcutsLogo {
             return image
         }
 
+        // Fit the mark itself, without the app tile's padding, at menu-bar size.
+        let bounds = CGRect(x: 272, y: 262, width: 713, height: 742)
+        let scale = max(1, size - 2) / max(bounds.width, bounds.height)
         context.saveGState()
-        drawMark(
-            in: context,
-            size: size,
-            primary: NSColor.white.cgColor,
-            secondary: NSColor.white.cgColor
+        context.translateBy(
+            x: (size - bounds.width * scale) / 2,
+            y: (size + bounds.height * scale) / 2
         )
+        context.scaleBy(x: scale, y: -scale)
+        context.translateBy(x: -bounds.minX, y: -bounds.minY)
+        drawMark(in: context, color: NSColor.white.cgColor)
         context.restoreGState()
 
         image.isTemplate = true
@@ -57,94 +55,77 @@ enum AIShortcutsLogo {
         context.saveGState()
         let canvas = CGRect(x: 0, y: 0, width: size, height: size)
         let tile = canvas.insetBy(dx: size * 0.04, dy: size * 0.04)
-        let tilePath = CGPath(
+        context.addPath(CGPath(
             roundedRect: tile,
             cornerWidth: size * 0.22,
             cornerHeight: size * 0.22,
             transform: nil
-        )
-
-        context.addPath(tilePath)
+        ))
         context.setFillColor(graphite.cgColor)
         context.fillPath()
 
-        context.addPath(tilePath)
-        context.setStrokeColor(purple.withAlphaComponent(0.48).cgColor)
-        context.setLineWidth(size * 0.012)
-        context.strokePath()
-
-        drawMark(
-            in: context,
-            size: size,
-            primary: purple.cgColor,
-            secondary: lilac.cgColor
-        )
+        context.translateBy(x: 0, y: size)
+        context.scaleBy(x: size / 1254, y: -size / 1254)
+        drawMark(in: context, color: purple.cgColor)
         context.restoreGState()
 
         image.accessibilityDescription = "AI Shortcuts"
         return image
     }
 
-    private static func drawMark(
-        in context: CGContext,
-        size: CGFloat,
-        primary: CGColor,
-        secondary: CGColor
-    ) {
-        let upper = CGMutablePath()
-        upper.move(to: CGPoint(x: size * 0.22, y: size * 0.58))
-        upper.addCurve(
-            to: CGPoint(x: size * 0.55, y: size * 0.68),
-            control1: CGPoint(x: size * 0.32, y: size * 0.80),
-            control2: CGPoint(x: size * 0.45, y: size * 0.80)
-        )
-        upper.addCurve(
-            to: CGPoint(x: size * 0.78, y: size * 0.42),
-            control1: CGPoint(x: size * 0.66, y: size * 0.58),
-            control2: CGPoint(x: size * 0.70, y: size * 0.42)
-        )
+    // Vector version of the chosen mark in Resources/AIShortcutsLogo.png. Keep
+    // these paths aligned with AIShortcutsLogo.svg. Both icon sizes use this mark.
+    private static func drawMark(in context: CGContext, color: CGColor) {
+        let bolt = CGMutablePath()
+        bolt.move(to: CGPoint(x: 634, y: 345))
+        bolt.addLine(to: CGPoint(x: 977, y: 264))
+        bolt.addQuadCurve(to: CGPoint(x: 982, y: 271), control: CGPoint(x: 985, y: 262))
+        bolt.addLine(to: CGPoint(x: 870, y: 557))
+        bolt.addQuadCurve(to: CGPoint(x: 865, y: 557), control: CGPoint(x: 868, y: 563))
+        bolt.addLine(to: CGPoint(x: 830, y: 490))
+        bolt.addQuadCurve(to: CGPoint(x: 821, y: 489), control: CGPoint(x: 826, y: 483))
+        bolt.addLine(to: CGPoint(x: 713, y: 616))
+        bolt.addQuadCurve(to: CGPoint(x: 716, y: 622), control: CGPoint(x: 709, y: 622))
+        bolt.addLine(to: CGPoint(x: 866, y: 622))
+        bolt.addQuadCurve(to: CGPoint(x: 870, y: 631), control: CGPoint(x: 875, y: 622))
+        bolt.addLine(to: CGPoint(x: 464, y: 1000))
+        bolt.addQuadCurve(to: CGPoint(x: 457, y: 997), control: CGPoint(x: 457, y: 1006))
+        bolt.addLine(to: CGPoint(x: 624, y: 721))
+        bolt.addQuadCurve(to: CGPoint(x: 620, y: 716), control: CGPoint(x: 627, y: 715))
+        bolt.addLine(to: CGPoint(x: 437, y: 733))
+        bolt.addQuadCurve(to: CGPoint(x: 431, y: 723), control: CGPoint(x: 425, y: 734))
+        bolt.addLine(to: CGPoint(x: 739, y: 409))
+        bolt.addQuadCurve(to: CGPoint(x: 736, y: 399), control: CGPoint(x: 743, y: 403))
+        bolt.addLine(to: CGPoint(x: 633, y: 351))
+        bolt.addQuadCurve(to: CGPoint(x: 634, y: 345), control: CGPoint(x: 624, y: 347))
+        bolt.closeSubpath()
 
-        let lower = CGMutablePath()
-        lower.move(to: CGPoint(x: size * 0.22, y: size * 0.42))
-        lower.addCurve(
-            to: CGPoint(x: size * 0.55, y: size * 0.32),
-            control1: CGPoint(x: size * 0.32, y: size * 0.20),
-            control2: CGPoint(x: size * 0.45, y: size * 0.20)
-        )
-        lower.addCurve(
-            to: CGPoint(x: size * 0.78, y: size * 0.58),
-            control1: CGPoint(x: size * 0.66, y: size * 0.42),
-            control2: CGPoint(x: size * 0.70, y: size * 0.58)
-        )
+        let upperTrail = CGMutablePath()
+        upperTrail.move(to: CGPoint(x: 382, y: 435))
+        upperTrail.addLine(to: CGPoint(x: 642, y: 396))
+        upperTrail.addQuadCurve(to: CGPoint(x: 668, y: 404), control: CGPoint(x: 659, y: 392))
+        upperTrail.addQuadCurve(to: CGPoint(x: 667, y: 418), control: CGPoint(x: 673, y: 411))
+        upperTrail.addLine(to: CGPoint(x: 655, y: 431))
+        upperTrail.addLine(to: CGPoint(x: 390, y: 478))
+        upperTrail.addQuadCurve(to: CGPoint(x: 365, y: 466), control: CGPoint(x: 369, y: 483))
+        upperTrail.addQuadCurve(to: CGPoint(x: 382, y: 435), control: CGPoint(x: 359, y: 447))
+        upperTrail.closeSubpath()
 
-        context.setLineWidth(max(size * 0.085, 1.5))
-        context.setLineCap(.round)
-        context.setLineJoin(.round)
+        let lowerTrail = CGMutablePath()
+        lowerTrail.move(to: CGPoint(x: 293, y: 525))
+        lowerTrail.addLine(to: CGPoint(x: 570, y: 474))
+        lowerTrail.addQuadCurve(to: CGPoint(x: 592, y: 481), control: CGPoint(x: 585, y: 471))
+        lowerTrail.addQuadCurve(to: CGPoint(x: 592, y: 497), control: CGPoint(x: 599, y: 488))
+        lowerTrail.addLine(to: CGPoint(x: 581, y: 510))
+        lowerTrail.addLine(to: CGPoint(x: 303, y: 561))
+        lowerTrail.addQuadCurve(to: CGPoint(x: 275, y: 550), control: CGPoint(x: 281, y: 567))
+        lowerTrail.addQuadCurve(to: CGPoint(x: 293, y: 525), control: CGPoint(x: 267, y: 533))
+        lowerTrail.closeSubpath()
 
-        context.addPath(upper)
-        context.setStrokeColor(primary)
-        context.strokePath()
-
-        context.addPath(lower)
-        context.setStrokeColor(secondary)
-        context.strokePath()
-
-        let center = CGPoint(x: size * 0.78, y: size * 0.78)
-        let outerRadius = size * 0.095
-        let innerRadius = size * 0.026
-        let spark = CGMutablePath()
-        spark.move(to: CGPoint(x: center.x, y: center.y + outerRadius))
-        spark.addLine(to: CGPoint(x: center.x + innerRadius, y: center.y + innerRadius))
-        spark.addLine(to: CGPoint(x: center.x + outerRadius, y: center.y))
-        spark.addLine(to: CGPoint(x: center.x + innerRadius, y: center.y - innerRadius))
-        spark.addLine(to: CGPoint(x: center.x, y: center.y - outerRadius))
-        spark.addLine(to: CGPoint(x: center.x - innerRadius, y: center.y - innerRadius))
-        spark.addLine(to: CGPoint(x: center.x - outerRadius, y: center.y))
-        spark.addLine(to: CGPoint(x: center.x - innerRadius, y: center.y + innerRadius))
-        spark.closeSubpath()
-
-        context.addPath(spark)
-        context.setFillColor(secondary)
-        context.fillPath()
+        context.setFillColor(color)
+        for path in [bolt, upperTrail, lowerTrail] {
+            context.addPath(path)
+            context.fillPath()
+        }
     }
 }

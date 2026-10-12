@@ -24,7 +24,14 @@ enum ScreenshotError: LocalizedError {
 
 @MainActor
 final class ScreenshotService {
+    typealias ProcessRunner = @MainActor ([String]) async throws -> Int32
+
     private var activeProcess: Process?
+    private let processRunner: ProcessRunner?
+
+    init(processRunner: ProcessRunner? = nil) {
+        self.processRunner = processRunner
+    }
 
     func cancelCapture() {
         guard let activeProcess, activeProcess.isRunning else {
@@ -33,11 +40,15 @@ final class ScreenshotService {
         activeProcess.terminate()
     }
 
-    func captureSelection() async throws -> ScreenshotCapture? {
+    func captureSelection(preserveClipboard: Bool = false) async throws -> ScreenshotCapture? {
+        if preserveClipboard {
+            return try await captureSelectionToTemporaryFile()
+        }
+
         let pasteboard = NSPasteboard.general
         let originalChangeCount = pasteboard.changeCount
 
-        let status = try await runScreenshotProcess()
+        let status = try await runScreenshotProcess(arguments: ["-i", "-s", "-c", "-x"])
         if status != 0 {
             // Escape normally exits without producing new clipboard data.
             if pasteboard.changeCount == originalChangeCount {
@@ -68,11 +79,42 @@ final class ScreenshotService {
         return ScreenshotCapture(pngData: pngData)
     }
 
-    private func runScreenshotProcess() async throws -> Int32 {
-        try await withCheckedThrowingContinuation { continuation in
+    private func captureSelectionToTemporaryFile() async throws -> ScreenshotCapture? {
+        let fileManager = FileManager.default
+        let url = fileManager.temporaryDirectory
+            .appendingPathComponent("ai-shortcuts-screenshot-\(UUID().uuidString)")
+            .appendingPathExtension("png")
+        defer {
+            // The screenshot is consumed into memory before returning. Do not
+            // leave cropped screen contents in the temporary directory.
+            try? fileManager.removeItem(at: url)
+        }
+
+        let status = try await runScreenshotProcess(
+            arguments: ["-i", "-s", "-x", "-t", "png", url.path]
+        )
+        guard status == 0 else {
+            // Escape exits screencapture without producing a file. Treat that
+            // as a cancelled selection so callers can show their manual path.
+            guard fileManager.fileExists(atPath: url.path) else {
+                return nil
+            }
+            throw ScreenshotError.commandFailed(status)
+        }
+        guard let pngData = try? Data(contentsOf: url), !pngData.isEmpty else {
+            return nil
+        }
+        return ScreenshotCapture(pngData: pngData)
+    }
+
+    private func runScreenshotProcess(arguments: [String]) async throws -> Int32 {
+        if let processRunner {
+            return try await processRunner(arguments)
+        }
+        return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-            process.arguments = ["-i", "-s", "-c", "-x"]
+            process.arguments = arguments
             activeProcess = process
             process.terminationHandler = { [weak self] completed in
                 let status = completed.terminationStatus
