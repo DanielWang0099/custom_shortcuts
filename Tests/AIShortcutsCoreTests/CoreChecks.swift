@@ -50,6 +50,7 @@ struct CoreChecks {
         failures += await run("sequential clipboard single press", sequentialClipboardSinglePressChecks)
         failures += await run("Insert matching and privacy", insertMatchingChecks)
         failures += await run("dictionary data, cache, and AI contracts", dictionaryChecks)
+        failures += await run("translation language selection", dictionaryTranslationLanguageChecks)
         failures += await run("Chinese script policy", chineseScriptChecks)
         failures += await run("dictionary history storage", dictionaryHistoryChecks)
         failures += await run("Responses request contract", requestContractCheck)

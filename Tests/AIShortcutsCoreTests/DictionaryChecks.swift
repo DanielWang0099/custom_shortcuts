@@ -678,11 +678,11 @@ private func dictionaryTypedAIChecks() async throws {
     let chineseOpenAIInstructions = (chineseOpenAIBody["messages"] as? [[String: Any]])?.first?["content"] as? String ?? ""
     try expectDictionary(chineseOpenAIInstructions.contains("Traditional Chinese (zh-Hant)"),
                          "OpenAI Dictionary sentence prompt lost Traditional target script.")
-    let paragraphSource = "First line.\nSecond line with  meaning."
+    let paragraphSource = "First paragraph.\n\nSecond paragraph with  meaning."
     let paragraphRequest = DictionaryAIRequest.sentenceContext(
         sourceText: paragraphSource, sourceLanguage: .en,
         targetLanguage: .traditionalChinese, includeSegmentation: false,
-        includeReadings: false, singleParagraph: true
+        includeReadings: false, translationOnly: true
     )
     let paragraphOpenAI = try openAIClient.makeDictionaryRequest(
         request: paragraphRequest, apiKey: "fixture-key", safetyIdentifier: "fixture-safe",
@@ -692,16 +692,20 @@ private func dictionaryTypedAIChecks() async throws {
     let paragraphMessages = paragraphBody["messages"] as? [[String: Any]]
     let paragraphInstructions = paragraphMessages?.first?["content"] as? String ?? ""
     let paragraphInput = ((paragraphMessages?.last?["content"] as? [[String: Any]])?.first?["text"] as? String) ?? ""
-    try expectDictionary(paragraphInstructions.contains("one natural paragraph")
+    try expectDictionary(paragraphInstructions.contains("Preserve the source's paragraph breaks")
                          && paragraphInstructions.contains("complete source text"),
-                         "OpenAI paragraph prompt is missing its one-paragraph contract.")
+                         "OpenAI translation prompt is missing paragraph preservation.")
     try expectDictionary(paragraphInstructions.contains("Traditional Chinese (zh-Hant)")
                          && paragraphInstructions.contains("Do not use lists, headings, commentary, or Markdown"),
                          "OpenAI paragraph prompt lost target script or output constraints.")
     try expectDictionary(paragraphInput.contains(paragraphSource),
                          "OpenAI paragraph input altered the full multiline source.")
-    try expectDictionary(DictionaryParagraphTranslation.normalized("  First  line.\n\n Second line.  ") == "First  line. Second line.",
-                         "Paragraph normalization changed internal spaces or kept line breaks.")
+    try expectDictionary(DictionaryParagraphTranslation.normalized("  First  line.\r\n\r\n Second line.  ") == "First  line.\n\nSecond line.",
+                         "Translation normalization merged paragraphs or changed internal spaces.")
+    try expectDictionary(DictionaryParagraphTranslation.normalized("\n First.\n\n\n\n Second.\rThird.\u{2029}Fourth.\u{2028}Last.\n") == "First.\n\nSecond.\nThird.\n\nFourth.\nLast.",
+                         "Translation normalization lost line/paragraph separators or left excessive blank lines.")
+    try expectDictionary(DictionaryParagraphTranslation.normalized(" \n\r\n\t ").isEmpty,
+                         "Whitespace-only translation was treated as usable output.")
     let openAIFormat = ((openAIBody["response_format"] as? [String: Any])?["json_schema"] as? [String: Any])
     try expectDictionary(openAIFormat?["name"] as? String == "dictionary_response", "OpenAI dictionary schema name was missing.")
     let indexedRequest = try openAIClient.makeDictionaryRequest(
@@ -756,7 +760,7 @@ private func dictionaryTypedAIChecks() async throws {
     let paragraphAnthropicBody = try expectDictionaryJSON(paragraphAnthropic.httpBody, "Paragraph Anthropic request is missing.")
     let anthropicInstructions = paragraphAnthropicBody["system"] as? String ?? ""
     let anthropicInput = ((paragraphAnthropicBody["messages"] as? [[String: Any]])?.first?["content"] as? [[String: Any]])?.first?["text"] as? String ?? ""
-    try expectDictionary(anthropicInstructions.contains("one natural paragraph")
+    try expectDictionary(anthropicInstructions.contains("Preserve the source's paragraph breaks")
                          && anthropicInstructions.contains("Traditional Chinese (zh-Hant)")
                          && anthropicInput.contains(paragraphSource),
                          "Anthropic paragraph prompt lost the full source or translation contract.")

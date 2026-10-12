@@ -11,6 +11,9 @@ final class PromptPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var completion: ((String?) -> Void)?
     private var finished = false
     private var allowsEmptySubmission = false
+    private lazy var clickAwayDismissal = TransientPanelDismissal(window: panel) { [weak self] in
+        self?.cancel()
+    }
 
     var isVisible: Bool { panel.isVisible }
 
@@ -142,6 +145,7 @@ final class PromptPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(textField)
+        clickAwayDismissal.start()
     }
 
     func control(
@@ -161,7 +165,7 @@ final class PromptPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        cancel()
+        clickAwayDismissal.handleResignKey()
     }
 
     func controlTextDidBeginEditing(_ notification: Notification) {
@@ -198,6 +202,7 @@ final class PromptPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             return
         }
         finished = true
+        clickAwayDismissal.stop()
         panel.orderOut(nil)
         let callback = completion
         completion = nil

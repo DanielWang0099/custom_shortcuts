@@ -18,6 +18,7 @@ xcrun swiftc -swift-version 6 -parse-as-library \
   Sources/AIShortcuts/DictionaryPanelController.swift \
   Sources/AIShortcuts/DictionaryNativeServices.swift \
   Sources/AIShortcuts/ShortcutUIStyle.swift \
+  Sources/AIShortcuts/TransientPanelDismissal.swift \
   Sources/AIShortcuts/AppStateStore.swift \
   Sources/AIShortcuts/AppConfiguration.swift \
   Sources/AIShortcuts/SelectionService.swift \
@@ -30,7 +31,7 @@ xcrun swiftc -swift-version 6 -parse-as-library \
   Tests/AIShortcutsDictionaryChecks/CaptureChecks.swift \
   Tests/AIShortcutsDictionaryChecks/LiveAIChecks.swift \
   @"${CHECK_PATH}/core-objects.rsp" \
-  -framework AppKit -framework Carbon -framework Vision -framework NaturalLanguage \
+  -framework AppKit -framework Carbon -framework NaturalLanguage \
   -framework CoreServices -framework AVFoundation -framework ApplicationServices -framework Security \
   -framework LocalAuthentication \
   -o "${CHECK_PATH}/DictionaryChecks"

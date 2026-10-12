@@ -32,6 +32,9 @@ final class WelcomeWindowController: NSObject, NSWindowDelegate {
     private let gotItButton = WelcomeActionButton(title: "Got it", target: nil, action: nil)
 
     private let stateStore: AppStateStore
+    private lazy var clickAwayDismissal = TransientPanelDismissal(window: panel) { [weak self] in
+        self?.dismiss()
+    }
     var onOpenModelSettings: (() -> Void)?
 
     var isVisible: Bool { panel.isVisible }
@@ -55,9 +58,11 @@ final class WelcomeWindowController: NSObject, NSWindowDelegate {
         panel.center()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        clickAwayDismissal.start()
     }
 
     func dismiss() {
+        clickAwayDismissal.stop()
         panel.orderOut(nil)
     }
 

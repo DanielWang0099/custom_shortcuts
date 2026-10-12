@@ -32,10 +32,11 @@ struct DictionaryNativeChecks {
             }
             try languageAndRanges()
             try preferences()
-            try await nativeOCR()
+            try pronunciationVoices()
             try panelRendering()
             try dictionaryPanelLayoutChecks()
             try dictionaryPanelTranslationChecks()
+            try await dictionaryPanelEditingChecks()
             try dictionaryPanelScrollerGutterChecks()
             try dictionaryPanelMovedPlacementChecks()
             try dictionaryPanelCompoundChecks()
@@ -44,6 +45,7 @@ struct DictionaryNativeChecks {
             try await dictionaryScreenshotChecks()
             try await dictionaryCaptureChecks()
             try await dictionaryTranslationChecks()
+            try await dictionaryEditingIntegrationChecks()
             try await dictionaryChineseScriptChecks()
             if CommandLine.arguments.contains("--live") {
                 try await liveDictionary()
@@ -238,23 +240,11 @@ struct DictionaryNativeChecks {
     }
 
     @MainActor
-    static func nativeOCR() async throws {
-        let languages = DictionaryOCRService.supportedRecognitionLanguages()
-        try check(languages.contains(where: { $0.hasPrefix("ja") }) && languages.contains(where: { $0.hasPrefix("zh") }),
-                  "Vision has no CJK recognition languages")
-        let samples = ["dictionary", "aprender idiomas", "你好世界", "図書館で食べる"]
-        for sample in samples {
-            let data = try imageWithText(sample)
-            let result = try await DictionaryOCRService.recognizeText(from: data)
-            let normalized = result.filter { !$0.isWhitespace }
-            try check(normalized.contains(sample.filter { !$0.isWhitespace }), "OCR failed: \(sample) -> \(result)")
-        }
-        let blank = try await DictionaryOCRService.recognizeText(from: imageWithText(""))
-        try check(blank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "Empty screenshot produced OCR text")
+    static func pronunciationVoices() throws {
         for code in ["en-US", "es-ES", "zh-CN", "ja-JP"] {
             try check(AVSpeechSynthesisVoice(language: code) != nil, "Missing native speech voice \(code)")
         }
-        print("PASS local OCR and available pronunciation voices for four languages")
+        print("PASS available pronunciation voices for four languages")
     }
 
     @MainActor
@@ -263,7 +253,7 @@ struct DictionaryNativeChecks {
                                           bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
                                           isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
               let context = NSGraphicsContext(bitmapImageRep: bitmap)
-        else { throw DictionaryCheckFailure(description: "Cannot create OCR test image") }
+        else { throw DictionaryCheckFailure(description: "Cannot create screenshot fixture") }
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = context
         NSColor.white.setFill()
@@ -273,7 +263,7 @@ struct DictionaryNativeChecks {
         ])
         NSGraphicsContext.restoreGraphicsState()
         guard let data = bitmap.representation(using: .png, properties: [:]) else {
-            throw DictionaryCheckFailure(description: "Cannot encode OCR test image")
+            throw DictionaryCheckFailure(description: "Cannot encode screenshot fixture")
         }
         return data
     }

@@ -7,6 +7,7 @@ enum ShortcutUIStyle {
     static let hudCornerRadius: CGFloat = 14
     static let explainCornerRadius: CGFloat = 24
     static let inputCornerRadius: CGFloat = 16
+    static let controlTransitionDuration: TimeInterval = 0.18
 
     // The shortcut UI intentionally uses one stable graphite palette. These
     // panels float over arbitrary apps, so inheriting the host appearance can

@@ -9,6 +9,83 @@ enum ChromeVoiceLaunchOutcome: Sendable {
     case alreadyActive
 }
 
+/// The receipt comes from the tab's owning normal window, never `front window`.
+struct ChromeVoiceTabLocation {
+    let windowIdentifier: Int
+    let tabIdentifier: Int
+    let url: URL
+    let isSelected: Bool
+    let isMinimized: Bool
+    let bounds: CGRect
+
+    init?(_ descriptor: NSAppleEventDescriptor) {
+        guard descriptor.numberOfItems == 6,
+              let rawWindow = descriptor.atIndex(1)?.stringValue,
+              let windowIdentifier = Int(rawWindow), windowIdentifier > 0,
+              let rawTab = descriptor.atIndex(2)?.stringValue,
+              let tabIdentifier = Int(rawTab), tabIdentifier > 0,
+              let rawURL = descriptor.atIndex(3)?.stringValue, let url = URL(string: rawURL),
+              Self.isChatGPT(url),
+              let rawActive = descriptor.atIndex(4)?.stringValue,
+              let active = Int(rawActive), active > 0,
+              let minimized = descriptor.atIndex(5),
+              [typeBoolean, typeTrue, typeFalse].contains(minimized.descriptorType),
+              let rectangle = descriptor.atIndex(6), rectangle.numberOfItems == 4 else { return nil }
+        var edges: [CGFloat] = []
+        for index in 1...4 {
+            guard let edge = rectangle.atIndex(index), edge.descriptorType == typeSInt32 else { return nil }
+            edges.append(CGFloat(edge.int32Value))
+        }
+        let bounds = CGRect(x: edges[0], y: edges[1], width: edges[2] - edges[0], height: edges[3] - edges[1])
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        self.windowIdentifier = windowIdentifier
+        self.tabIdentifier = tabIdentifier
+        self.url = url
+        self.isSelected = active == tabIdentifier
+        self.isMinimized = minimized.booleanValue
+        self.bounds = bounds
+    }
+
+    static func isChatGPT(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "https" && url.host?.lowercased() == "chatgpt.com"
+    }
+
+    static func samePage(_ first: URL, _ second: URL) -> Bool {
+        guard isChatGPT(first), isChatGPT(second) else { return false }
+        func normalized(_ url: URL) -> URL? {
+            guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+            parts.scheme = parts.scheme?.lowercased()
+            parts.host = parts.host?.lowercased()
+            parts.fragment = nil
+            if parts.path.isEmpty { parts.path = "/" }
+            return parts.url
+        }
+        return normalized(first) == normalized(second)
+    }
+}
+
+enum ChromeVoiceScripts {
+    static func locate(tabIdentifier: Int) -> String {
+        """
+        with timeout of 2 seconds
+            tell application id "com.google.Chrome"
+                if not running then return {}
+                repeat with candidateWindow in windows
+                    if mode of candidateWindow is "normal" then
+                        repeat with candidateTab in tabs of candidateWindow
+                            if (id of candidateTab as text) is "\(tabIdentifier)" then
+                                return {id of candidateWindow as text, id of candidateTab as text, URL of candidateTab, id of active tab of candidateWindow as text, minimized of candidateWindow, bounds of candidateWindow}
+                            end if
+                        end repeat
+                    end if
+                end repeat
+                return {}
+            end tell
+        end timeout
+        """
+    }
+}
+
 enum ChromeVoiceError: LocalizedError, Sendable {
     case accessibilityDenied
     case automationDenied
@@ -21,6 +98,7 @@ enum ChromeVoiceError: LocalizedError, Sendable {
     case reloadUnavailable
     case unsupportedPress
     case startFailed
+    case timedOut
 
     var errorDescription: String? {
         switch self {
@@ -35,7 +113,7 @@ enum ChromeVoiceError: LocalizedError, Sendable {
         case .accessibilityUnavailable:
             "Chrome's accessible page is not available. Check the ChatGPT tab and retry."
         case .targetChanged:
-            "Chrome's selected tab changed during startup. Press ChatGPT Voice again to retry."
+            "ChatGPT Voice stopped because its Chrome tab lost focus. Retry without switching tabs."
         case .ambiguousControls:
             "ChatGPT exposed more than one voice button. Check its open tab and retry."
         case .controlsUnavailable:
@@ -46,6 +124,8 @@ enum ChromeVoiceError: LocalizedError, Sendable {
             "ChatGPT's voice button could not be pressed through Accessibility. Check its open tab and retry."
         case .startFailed:
             "ChatGPT did not finish starting voice. Check voice setup and microphone permission in Chrome, then retry."
+        case .timedOut:
+            "ChatGPT Voice timed out. Check Chrome's sign-in and microphone setup, then retry."
         }
     }
 }
@@ -108,6 +188,7 @@ final class ChromeVoiceSessionService {
 private final class ChromeVoiceCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
+    let budget = ChromeVoiceLaunchBudget()
 
     func cancel() {
         lock.withLock { cancelled = true }
@@ -117,6 +198,9 @@ private final class ChromeVoiceCancellation: @unchecked Sendable {
         if lock.withLock({ cancelled }) {
             throw CancellationError()
         }
+        if budget.remaining() == 0 {
+            throw ChromeVoiceError.timedOut
+        }
     }
 }
 
@@ -124,8 +208,8 @@ private final class ChromeVoiceCancellation: @unchecked Sendable {
 /// cancellation flag. AXUIElement and NSAppleScript never cross the queue.
 private final class ChromeVoiceWorker: @unchecked Sendable {
     private static let bundleIdentifier = "com.google.Chrome"
-    private static let readinessTimeout: TimeInterval = 20
-    private static let pollInterval: TimeInterval = 0.35
+    private static let readinessTimeout: TimeInterval = 3
+    private static let pollInterval: TimeInterval = 0.15
     private static let startLabels: Set<String> = [
         "start voice", "start voice mode", "start a voice conversation", "use voice mode",
         "开始语音", "開始語音", "開始語音模式",
@@ -148,12 +232,7 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
         "重新載入", "重新載入此頁", "重新載入此頁面", "重新載入網頁",
     ]
 
-    private struct TabLocation {
-        let windowIdentifier: Int
-        let tabIdentifier: Int
-        let url: URL
-        let isSelected: Bool
-    }
+    private typealias TabLocation = ChromeVoiceTabLocation
 
     private struct Snapshot {
         let window: AXUIElement
@@ -204,6 +283,7 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
     private var retainedTarget: RetainedTarget?
     private var trackedLaunchDate: Date?
     private var monitor: DispatchSourceTimer?
+    private var inspectionDeadline: TimeInterval?
 
     deinit {
         monitor?.cancel()
@@ -304,7 +384,7 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
         cancellation: ChromeVoiceCancellation
     ) throws -> ChromeVoiceTabReference {
         let source = """
-        with timeout of 10 seconds
+        with timeout of 2 seconds
             tell application id "com.google.Chrome"
                 activate
                 set targetWindow to missing value
@@ -324,7 +404,7 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
                     set targetTab to make new tab at end of tabs of targetWindow with properties {URL:"https://chatgpt.com/"}
                     set active tab index of targetWindow to (count of tabs of targetWindow)
                 end if
-                return {id of targetWindow as text, id of targetTab as text, URL of targetTab, id of active tab of targetWindow as text}
+                return {id of targetWindow as text, id of targetTab as text, URL of targetTab, id of active tab of targetWindow as text, minimized of targetWindow, bounds of targetWindow}
             end tell
         end timeout
         """
@@ -333,7 +413,7 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
             cancellation: cancellation,
             checkCancellationAfterExecution: false
         )
-        guard let location = tabLocation(descriptor), let application = chrome() else {
+        guard let location = TabLocation(descriptor), let application = chrome() else {
             throw ChromeVoiceError.automationFailed(0)
         }
         let reference = ChromeVoiceTabReference(
@@ -355,25 +435,9 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
         cancellation: ChromeVoiceCancellation?
     ) throws -> TabLocation? {
         guard chromeMatches(reference) else { return nil }
-        let source = """
-        with timeout of 10 seconds
-            tell application id "com.google.Chrome"
-                if not running then return {}
-                repeat with candidateWindow in windows
-                    if mode of candidateWindow is "normal" then
-                        repeat with candidateTab in tabs of candidateWindow
-                            if (id of candidateTab as text) is "\(reference.tabIdentifier)" then
-                                return {id of candidateWindow as text, id of candidateTab as text, URL of candidateTab, id of active tab of candidateWindow as text}
-                            end if
-                        end repeat
-                    end if
-                end repeat
-                return {}
-            end tell
-        end timeout
-        """
+        let source = ChromeVoiceScripts.locate(tabIdentifier: reference.tabIdentifier)
         let descriptor = try execute(source, cancellation: cancellation)
-        guard chromeMatches(reference), let location = tabLocation(descriptor),
+        guard chromeMatches(reference), let location = TabLocation(descriptor),
               location.tabIdentifier == reference.tabIdentifier else { return nil }
         return location
     }
@@ -384,7 +448,7 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
     ) throws -> TabLocation? {
         guard chromeMatches(reference) else { return nil }
         let source = """
-        with timeout of 10 seconds
+        with timeout of 2 seconds
             tell application id "com.google.Chrome"
                 if not running then return {}
                 repeat with candidateWindow in windows
@@ -397,7 +461,7 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
                                 set index of candidateWindow to 1
                                 set active tab index of candidateWindow to tabIndex
                                 activate
-                                return {id of candidateWindow as text, id of candidateTab as text, URL of candidateTab, id of active tab of candidateWindow as text}
+                                return {id of candidateWindow as text, id of candidateTab as text, URL of candidateTab, id of active tab of candidateWindow as text, minimized of candidateWindow, bounds of candidateWindow}
                             end if
                         end repeat
                     end if
@@ -407,7 +471,7 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
         end timeout
         """
         let descriptor = try execute(source, cancellation: cancellation)
-        guard chromeMatches(reference), let location = tabLocation(descriptor),
+        guard chromeMatches(reference), let location = TabLocation(descriptor),
               location.tabIdentifier == reference.tabIdentifier else { return nil }
         return location
     }
@@ -416,29 +480,30 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
         _ reference: ChromeVoiceTabReference,
         cancellation: ChromeVoiceCancellation
     ) throws -> TabLocation {
+        let previousDeadline = inspectionDeadline
+        inspectionDeadline = min(previousDeadline ?? .infinity, cancellation.budget.deadline)
+        defer { inspectionDeadline = previousDeadline }
         try cancellation.check()
         guard chromeMatches(reference),
               NSWorkspace.shared.frontmostApplication?.processIdentifier
                 == reference.processIdentifier else { throw ChromeVoiceError.targetChanged }
-        let source = """
-        with timeout of 10 seconds
-            tell application id "com.google.Chrome"
-                if not running then return {}
-                if (count of windows) is 0 then return {}
-                if mode of front window is not "normal" then return {}
-                if (id of active tab of front window as text) is not "\(reference.tabIdentifier)" then return {}
-                return {id of front window as text, id of active tab of front window as text, URL of active tab of front window, id of active tab of front window as text}
-            end tell
-        end timeout
-        """
-        let descriptor = try execute(source, cancellation: cancellation)
+        guard let location = try locate(reference, cancellation: cancellation) else {
+            throw ChromeVoiceError.targetChanged
+        }
         guard chromeMatches(reference),
               NSWorkspace.shared.frontmostApplication?.processIdentifier
                 == reference.processIdentifier,
-              let location = tabLocation(descriptor), location.isSelected,
-              location.tabIdentifier == reference.tabIdentifier else {
+              let window = focusedWindow(reference),
+              matches(window, location: location) else {
             throw ChromeVoiceError.targetChanged
         }
+        let application = AXUIElementCreateApplication(reference.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.2)
+        guard let windows = value(application, kAXWindowsAttribute) as? [AXUIElement],
+              windows.filter({ matches($0, location: location) }).count == 1 else {
+            throw ChromeVoiceError.accessibilityUnavailable
+        }
+        try cancellation.check()
         return location
     }
 
@@ -468,23 +533,6 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
         return descriptor
     }
 
-    private func tabLocation(_ descriptor: NSAppleEventDescriptor) -> TabLocation? {
-        guard descriptor.numberOfItems == 4,
-              let rawWindow = descriptor.atIndex(1)?.stringValue,
-              let windowIdentifier = Int(rawWindow), windowIdentifier > 0,
-              let rawTab = descriptor.atIndex(2)?.stringValue,
-              let tabIdentifier = Int(rawTab), tabIdentifier > 0,
-              let rawURL = descriptor.atIndex(3)?.stringValue, let url = URL(string: rawURL),
-              isChatGPT(url),
-              let active = descriptor.atIndex(4)?.stringValue else { return nil }
-        return TabLocation(
-            windowIdentifier: windowIdentifier,
-            tabIdentifier: tabIdentifier,
-            url: url,
-            isSelected: Int(active) == tabIdentifier
-        )
-    }
-
     private func chrome() -> NSRunningApplication? {
         NSRunningApplication.runningApplications(
             withBundleIdentifier: Self.bundleIdentifier
@@ -501,23 +549,39 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
     }
 
     private func isChatGPT(_ url: URL) -> Bool {
-        url.scheme?.lowercased() == "https" && url.host?.lowercased() == "chatgpt.com"
+        ChromeVoiceTabLocation.isChatGPT(url)
     }
 
     private func waitForChromeFocus(
         _ reference: ChromeVoiceTabReference,
         cancellation: ChromeVoiceCancellation
     ) throws {
-        // Chrome's activate event can return just before a Space/window switch
-        // updates NSWorkspace. Allow that short handoff without reactivating it.
-        let deadline = Date().addingTimeInterval(2)
+        inspectionDeadline = cancellation.budget.deadline
+        defer { inspectionDeadline = nil }
+        guard let location = try locate(reference, cancellation: cancellation),
+              location.isSelected, !location.isMinimized else {
+            throw ChromeVoiceError.targetChanged
+        }
+        let application = AXUIElementCreateApplication(reference.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.2)
+        // Chrome may leave its scripting window order stale after `set index`.
+        // Raise only the exact normal window returned for our owned tab.
+        if let windows = value(application, kAXWindowsAttribute) as? [AXUIElement] {
+            let candidates = windows.filter { matches($0, location: location) }
+            guard candidates.count == 1, let window = candidates.first else {
+                throw ChromeVoiceError.accessibilityUnavailable
+            }
+            _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        }
+        let deadline = cancellation.budget.stageDeadline(duration: 1.5)
         repeat {
             try cancellation.check()
             guard chromeMatches(reference) else { throw ChromeVoiceError.targetChanged }
             if NSWorkspace.shared.frontmostApplication?.processIdentifier
-                == reference.processIdentifier { return }
+                == reference.processIdentifier,
+               let window = focusedWindow(reference), matches(window, location: location) { return }
             Thread.sleep(forTimeInterval: 0.05)
-        } while Date() < deadline
+        } while ProcessInfo.processInfo.systemUptime < deadline
         throw ChromeVoiceError.targetChanged
     }
 
@@ -527,7 +591,9 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
         requireReloadReady: Bool = false,
         cancellation: ChromeVoiceCancellation
     ) throws -> Snapshot {
-        let deadline = Date().addingTimeInterval(Self.readinessTimeout)
+        let deadline = cancellation.budget.stageDeadline(
+            duration: starting ? 3 : (requireReloadReady ? 4 : Self.readinessTimeout)
+        )
         repeat {
             try cancellation.check()
             do {
@@ -543,7 +609,8 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
             }
             try cancellation.check()
             Thread.sleep(forTimeInterval: Self.pollInterval)
-        } while Date() < deadline
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        try cancellation.check()
         throw starting ? ChromeVoiceError.startFailed : ChromeVoiceError.controlsUnavailable
     }
 
@@ -613,28 +680,58 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
         _ reference: ChromeVoiceTabReference,
         cancellation: ChromeVoiceCancellation
     ) throws -> Snapshot {
+        let previousDeadline = inspectionDeadline
+        inspectionDeadline = min(cancellation.budget.deadline, ProcessInfo.processInfo.systemUptime + 1.5)
+        defer { inspectionDeadline = previousDeadline }
         guard AXIsProcessTrusted() else { throw ChromeVoiceError.accessibilityDenied }
         let location = try verifySelected(reference, cancellation: cancellation)
-        let application = AXUIElementCreateApplication(reference.processIdentifier)
-        AXUIElementSetMessagingTimeout(application, 1)
-        guard let window = elementValue(application, kAXFocusedWindowAttribute) else {
+        guard let window = focusedWindow(reference) else {
             throw ChromeVoiceError.accessibilityUnavailable
         }
+        guard matches(window, location: location) else { throw ChromeVoiceError.targetChanged }
         let chromeNodes = try walk(window, stopAtWebAreas: true, cancellation: cancellation)
         let areas = chromeNodes.filter { element in
             guard textValue(element, kAXRoleAttribute) == "AXWebArea",
                   let url = URL(string: textValue(element, kAXURLAttribute)) else { return false }
-            return isChatGPT(url)
+            return ChromeVoiceTabLocation.samePage(url, location.url)
         }
         guard areas.count == 1, let area = areas.first else {
             throw ChromeVoiceError.accessibilityUnavailable
         }
-        return try snapshot(
+        let current = try snapshot(
             window: window,
             area: area,
             chromeNodes: chromeNodes,
             location: location,
             cancellation: cancellation
+        )
+        try cancellation.check()
+        return current
+    }
+
+    private func focusedWindow(_ reference: ChromeVoiceTabReference) -> AXUIElement? {
+        let application = AXUIElementCreateApplication(reference.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.2)
+        return elementValue(application, kAXFocusedWindowAttribute)
+    }
+
+    private func matches(_ window: AXUIElement, location: TabLocation) -> Bool {
+        if (value(window, kAXMinimizedAttribute) as? NSNumber)?.boolValue == true { return false }
+        guard let rawPosition = value(window, kAXPositionAttribute),
+              let rawSize = value(window, kAXSizeAttribute),
+              CFGetTypeID(rawPosition) == AXValueGetTypeID(),
+              CFGetTypeID(rawSize) == AXValueGetTypeID() else { return false }
+        let positionValue = rawPosition as! AXValue
+        let sizeValue = rawSize as! AXValue
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionValue, .cgPoint, &position),
+              AXValueGetValue(sizeValue, .cgSize, &size) else { return false }
+        return ChromeVoiceTargetPolicy.matchesFocusedWindow(
+            tabIsSelected: location.isSelected,
+            windowIsMinimized: location.isMinimized,
+            scriptingBounds: location.bounds,
+            focusedBounds: CGRect(origin: position, size: size)
         )
     }
 
@@ -676,6 +773,10 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
             (names(element) + [textValue(element, kAXValueAttribute)]).contains {
                 Self.connectingLabels.contains(normalized($0))
             }
+        }
+        try cancellation?.check()
+        if let inspectionDeadline, ProcessInfo.processInfo.systemUptime >= inspectionDeadline {
+            throw ChromeVoiceError.accessibilityUnavailable
         }
         return Snapshot(
             window: window,
@@ -731,6 +832,8 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
                 reset()
                 return
             }
+            inspectionDeadline = ProcessInfo.processInfo.systemUptime + 1
+            defer { inspectionDeadline = nil }
             guard let retainedTarget, retainedTarget.reference == reference,
                   retainedTarget.snapshot.location.windowIdentifier == location.windowIdentifier,
                   location.isSelected else {
@@ -742,7 +845,7 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
             // Only read it when the scripting ID still identifies the selected
             // owned tab in this window; no foreground/app activation is needed.
             let application = AXUIElementCreateApplication(reference.processIdentifier)
-            AXUIElementSetMessagingTimeout(application, 1)
+            AXUIElementSetMessagingTimeout(application, 0.2)
             guard let windows = value(application, kAXWindowsAttribute) as? [AXUIElement],
                   windows.contains(where: { CFEqual($0, retained.window) }),
                   textValue(retained.webArea, kAXRoleAttribute) == "AXWebArea",
@@ -780,6 +883,9 @@ private final class ChromeVoiceWorker: @unchecked Sendable {
     }
 
     private func value(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
+        if let inspectionDeadline, ProcessInfo.processInfo.systemUptime >= inspectionDeadline {
+            return nil
+        }
         var result: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &result) == .success else {
             return nil

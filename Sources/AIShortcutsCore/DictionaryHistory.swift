@@ -11,6 +11,7 @@ public struct DictionaryHistoryItem: Codable, Equatable, Identifiable, Sendable 
     public let sourceLanguage: String
     public let detectedSourceLanguage: String?
     public let targetLanguage: String
+    public let presentationMode: DictionaryPresentationMode
     public let lookedUpAt: Date
 
     public init(
@@ -19,6 +20,7 @@ public struct DictionaryHistoryItem: Codable, Equatable, Identifiable, Sendable 
         sourceLanguage: String,
         detectedSourceLanguage: String? = nil,
         targetLanguage: String,
+        presentationMode: DictionaryPresentationMode = .dictionary,
         lookedUpAt: Date = Date()
     ) {
         self.id = id
@@ -26,7 +28,26 @@ public struct DictionaryHistoryItem: Codable, Equatable, Identifiable, Sendable 
         self.sourceLanguage = sourceLanguage
         self.detectedSourceLanguage = detectedSourceLanguage
         self.targetLanguage = targetLanguage
+        self.presentationMode = presentationMode
         self.lookedUpAt = lookedUpAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, query, sourceLanguage, detectedSourceLanguage, targetLanguage, presentationMode, lookedUpAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        query = try container.decode(String.self, forKey: .query)
+        sourceLanguage = try container.decode(String.self, forKey: .sourceLanguage)
+        detectedSourceLanguage = try container.decodeIfPresent(String.self, forKey: .detectedSourceLanguage)
+        targetLanguage = try container.decode(String.self, forKey: .targetLanguage)
+        // History saved before Translate mode was introduced is a dictionary
+        // lookup, even when the current global preference is Translate.
+        presentationMode = try container.decodeIfPresent(DictionaryPresentationMode.self, forKey: .presentationMode)
+            ?? .dictionary
+        lookedUpAt = try container.decode(Date.self, forKey: .lookedUpAt)
     }
 }
 
@@ -95,7 +116,7 @@ public final class DictionaryHistoryStore {
         let items: [DictionaryHistoryItem]
 
         init(items: [DictionaryHistoryItem]) {
-            self.version = 1
+            self.version = 2
             self.items = items
         }
 
@@ -157,6 +178,7 @@ public final class DictionaryHistoryStore {
         sourceLanguage: String,
         detectedSourceLanguage: String? = nil,
         targetLanguage: String,
+        presentationMode: DictionaryPresentationMode = .dictionary,
         at date: Date = Date()
     ) -> DictionaryHistoryItem? {
         let queryKey = Self.normalizedQuery(query)
@@ -171,7 +193,8 @@ public final class DictionaryHistoryStore {
         let key = Self.deduplicationKey(
             query: queryKey,
             sourceLanguage: source,
-            targetLanguage: target
+            targetLanguage: target,
+            presentationMode: presentationMode
         )
 
         let result: DictionaryHistoryItem
@@ -186,6 +209,7 @@ public final class DictionaryHistoryStore {
                 sourceLanguage: source,
                 detectedSourceLanguage: detected,
                 targetLanguage: target,
+                presentationMode: presentationMode,
                 lookedUpAt: date
             )
             proposedItems[existingIndex] = result
@@ -195,6 +219,7 @@ public final class DictionaryHistoryStore {
                 sourceLanguage: source,
                 detectedSourceLanguage: detected,
                 targetLanguage: target,
+                presentationMode: presentationMode,
                 lookedUpAt: date
             )
             proposedItems.append(result)
@@ -405,6 +430,7 @@ public final class DictionaryHistoryStore {
             sourceLanguage: Self.normalizedLanguage(item.sourceLanguage) ?? "auto",
             detectedSourceLanguage: Self.normalizedLanguage(item.detectedSourceLanguage),
             targetLanguage: target,
+            presentationMode: item.presentationMode,
             lookedUpAt: item.lookedUpAt
         )
     }
@@ -430,16 +456,18 @@ public final class DictionaryHistoryStore {
         deduplicationKey(
             query: normalizedQuery(item.query),
             sourceLanguage: normalizedLanguage(item.sourceLanguage) ?? "auto",
-            targetLanguage: normalizedLanguage(item.targetLanguage) ?? ""
+            targetLanguage: normalizedLanguage(item.targetLanguage) ?? "",
+            presentationMode: item.presentationMode
         )
     }
 
     private static func deduplicationKey(
         query: String,
         sourceLanguage: String,
-        targetLanguage: String
+        targetLanguage: String,
+        presentationMode: DictionaryPresentationMode
     ) -> String {
         // Length prefixes avoid collisions if a query contains separators.
-        "\(query.utf8.count):\(query)|\(sourceLanguage)|\(targetLanguage)"
+        "\(query.utf8.count):\(query)|\(sourceLanguage)|\(targetLanguage)|\(presentationMode.rawValue)"
     }
 }

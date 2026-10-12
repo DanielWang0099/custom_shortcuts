@@ -38,7 +38,6 @@ let package = Package(
                 .linkedFramework("WebKit"),
                 .linkedFramework("CoreServices"),
                 .linkedFramework("NaturalLanguage"),
-                .linkedFramework("Vision"),
                 .linkedFramework("AVFoundation"),
             ]
         ),

@@ -103,6 +103,7 @@ private final class CaptureFixture {
     var paragraphRequests: [DictionarySentenceContextRequest] = []
     var paragraphCompletions: [DictionarySentenceContextRequest] = []
     var enrichmentLanguages: [String] = []
+    var enrichedTokens: [String] = []
     var enrichmentReadings: [String] = []
     var enrichmentCount = 0
     var chineseOppositeAI = false
@@ -114,41 +115,27 @@ private final class CaptureFixture {
     var paragraphOutput: String?
     var paragraphOutputForRequest: ((DictionarySentenceContextRequest) -> String?)?
     var selected: String?
-    var recognized: String
-    var screenshot: Data?
-    var captureError = false
     var selectionDelay: UInt64 = 0
     var contextSegmentation: [DictionaryToken]
 
-    init(selected: String?, recognized: String = "", screenshot: Data? = Data([1]),
-         accessibility: Bool = true, screen: Bool = true, transport: CaptureDictionaryTransport = .init(),
+    init(selected: String?,
+         accessibility: Bool = true, transport: CaptureDictionaryTransport = .init(),
          useAI: Bool = false, contextSegmentation: [DictionaryToken] = [],
          nativeRefinement: DictionaryCoordinator.NativeRefinement? = nil, targetLanguage: String = "en",
          presentationMode: DictionaryPresentationMode = .dictionary) {
         defaults = UserDefaults(suiteName: name)!
         self.selected = selected
-        self.recognized = recognized
-        self.screenshot = screenshot
         self.transport = transport
         historyStore = DictionaryHistoryStore(fileURL: nil)
         self.contextSegmentation = contextSegmentation
         let dependencies = DictionaryCoordinator.CaptureDependencies(
-            accessibilityTrusted: { accessibility }, screenRecordingGranted: { screen },
+            accessibilityTrusted: { accessibility },
             selectedText: { [weak self] in
                 guard let self else { return nil }
                 self.events.append("selection")
                 // Deliberately finish after cancellation to test generation guards.
                 if self.selectionDelay > 0 { try? await Task.sleep(nanoseconds: self.selectionDelay) }
                 return self.selected
-            },
-            screenshotPNG: { [weak self] in
-                guard let self else { return nil }
-                self.events.append("screenshot")
-                if self.captureError { throw CaptureCheckFailure(description: "fixture screenshot failure") }
-                return self.screenshot
-            }, recognizeText: { [weak self] _ in
-                self?.events.append("OCR")
-                return self?.recognized ?? ""
             }
         )
         var completion: DictionaryCoordinator.AICompletion?
@@ -157,23 +144,23 @@ private final class CaptureFixture {
                 switch request {
                 case let .sentenceContext(context):
                     self?.contexts.append(context.sourceText + ":" + (context.targetLanguage?.rawValue ?? "en"))
-                    if context.singleParagraph { self?.paragraphRequests.append(context) }
+                    if context.translationOnly { self?.paragraphRequests.append(context) }
                     if self?.failContext == true { throw CaptureCheckFailure(description: "fixture context failure") }
                     // Capture each response before waiting. A late response must
                     // retain its old query/target even after the fixture changes.
-                    let malformed = context.singleParagraph && self?.malformedParagraphResponse == true
-                    let missing = context.singleParagraph && self?.missingParagraphTranslation == true
+                    let malformed = context.translationOnly && self?.malformedParagraphResponse == true
+                    let missing = context.translationOnly && self?.missingParagraphTranslation == true
                     let output = self?.paragraphOutputForRequest?(context) ?? self?.paragraphOutput
                         ?? (self?.chineseOppositeAI == true && context.targetLanguage?.endpointCode == "zh"
                             ? "无法继续" : "Translated: " + context.sourceText)
-                    let delay = context.singleParagraph ? (self?.paragraphDelay ?? 160_000_000) : 160_000_000
-                    if context.singleParagraph && self?.ignoreParagraphCancellation == true {
+                    let delay = context.translationOnly ? (self?.paragraphDelay ?? 160_000_000) : 160_000_000
+                    if context.translationOnly && self?.ignoreParagraphCancellation == true {
                         let sleeper = Task.detached { try? await Task.sleep(nanoseconds: delay) }
                         await sleeper.value
                     } else {
                         try await Task.sleep(nanoseconds: delay)
                     }
-                    if context.singleParagraph { self?.paragraphCompletions.append(context) }
+                    if context.translationOnly { self?.paragraphCompletions.append(context) }
                     if malformed {
                         return DictionaryAIResponse(kind: .entryEnrichment)
                     }
@@ -183,6 +170,7 @@ private final class CaptureFixture {
                         segmentedTokens: self?.contextSegmentation ?? []
                     )
                 case let .entryEnrichment(request):
+                    if let token = request.focusToken?.text { self?.enrichedTokens.append(token) }
                     if let language = request.focusToken?.language?.rawValue {
                         self?.enrichmentLanguages.append(language)
                     }
@@ -206,7 +194,7 @@ private final class CaptureFixture {
         AppStateStore(defaults: self.defaults).dictionaryPresentationMode = presentationMode
         coordinator = DictionaryCoordinator(
             stateStore: AppStateStore(defaults: self.defaults), selectionService: SelectionService(),
-            screenshotService: ScreenshotService(), panel: self.panel,
+            panel: self.panel,
             lookupService: DictionaryLookupService(transport: self.transport, cacheDirectoryURL: self.directory),
             historyStore: self.historyStore,
             captureDependencies: dependencies,
@@ -267,6 +255,65 @@ private final class CaptureFixture {
         menu.select(item)
         _ = NSApp.sendAction(action, to: menu.target, from: menu)
     }
+}
+
+@MainActor
+func dictionaryEditingIntegrationChecks() async throws {
+    let full = "romantic experience feels special."
+    let phrase = "romantic experience"
+    let native = DictionaryLanguageService.tokenize(full)
+    let fixture = CaptureFixture(selected: full, useAI: true,
+        contextSegmentation: native.filter(\.isWord).map {
+            DictionaryToken(text: $0.text, sourceRange: $0.utf16Range, language: .english)
+        }, targetLanguage: "zh")
+    defer { fixture.clean() }
+    try await fixture.start()
+    let sentence = fixture.controls.compactMap { $0 as? NSTextView }
+        .first { $0.accessibilityLabel() == "Sentence source" }!
+    let words = native.filter(\.isWord)
+    func event(_ type: NSEvent.EventType, range: NSRange) throws -> NSEvent {
+        let layout = sentence.layoutManager!, container = sentence.textContainer!
+        let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let rect = layout.boundingRect(forGlyphRange: glyphs, in: container)
+        guard let result = NSEvent.mouseEvent(with: type,
+            location: sentence.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil), modifierFlags: [],
+            timestamp: 0, windowNumber: fixture.window!.windowNumber, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 1)
+        else { throw CaptureCheckFailure(description: "Cannot create coordinator phrase event") }
+        return result
+    }
+    sentence.mouseDown(with: try event(.leftMouseDown, range: words[0].utf16Range))
+    sentence.mouseDragged(with: try event(.leftMouseDragged, range: words[1].utf16Range))
+    sentence.mouseUp(with: try event(.leftMouseUp, range: words[1].utf16Range))
+    try await waitUntil { fixture.enrichedTokens.contains(phrase) && fixture.labels.contains("Translated: " + full) }
+    try requireCapture(fixture.transport.requests.contains { $0.hasSuffix("/" + phrase) }
+                       && fixture.labels.contains("fixture definition for " + phrase)
+                       && fixture.lookupField?.stringValue == full,
+                       "A dragged phrase was split into words or replaced its sentence context")
+    try fixture.chooseLanguage("es")
+    try await waitUntil { fixture.contexts.contains(full + ":es") && fixture.labels.contains("fixture definition for " + phrase) }
+    try requireCapture(fixture.enrichedTokens.last == phrase && fixture.lookupField?.stringValue == full,
+                       "AI segmentation or a target change discarded the selected phrase")
+    fixture.clean()
+
+    let translated = CaptureFixture(selected: "The original paragraph.", useAI: true, presentationMode: .translate)
+    defer { translated.clean() }
+    try await translated.start()
+    try await waitUntil { translated.paragraphCompletions.count == 1 }
+    let editor = translated.controls.compactMap { $0 as? NSTextView }
+        .first { $0.accessibilityIdentifier() == "dictionary.translate.source" }!
+    let edited = "An edited paragraph.\nIts complete second line."
+    translated.window?.makeFirstResponder(editor)
+    editor.string = edited
+    translated.panel.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+    try await waitUntil { translated.paragraphRequests.contains { $0.sourceText == edited } }
+    try await waitUntil { translated.labels.contains("Translated: " + DictionaryParagraphTranslation.normalized(edited)) }
+    try requireCapture(translated.panel.currentDraft == edited && translated.paragraphRequests.count == 2,
+                       "Editing the source did not translate the full synchronized paragraph exactly once")
+    try translated.click("Switch to Dictionary")
+    try requireCapture(translated.panel.currentDraft == edited,
+                       "Switching from the editable source to Dictionary lost its multiline draft")
+    print("PASS coordinator phrase lookup/context retention and automatic editable-source translation")
 }
 
 @MainActor
@@ -367,6 +414,18 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
 
 @MainActor
 func dictionaryTranslationChecks() async throws {
+    let paragraphSource = "First source paragraph.\n\nSecond source paragraph."
+    let paragraphs = CaptureFixture(selected: paragraphSource, useAI: true, presentationMode: .translate)
+    defer { paragraphs.clean() }
+    paragraphs.paragraphOutput = "  第一段。\r\n\r\n 第二段。  "
+    try await paragraphs.start()
+    try await waitUntil { paragraphs.labels.contains("第一段。\n\n第二段。") }
+    try requireCapture(paragraphs.panel.currentDraft == paragraphSource,
+                       "Preserving translated paragraphs altered the original source")
+    if let window = paragraphs.window {
+        try DictionaryNativeChecks.savePreview(window, name: "translation-paragraphs")
+    }
+    paragraphs.clean()
     let source = "A complete captured paragraph begins here.\nIts second line contains the important ending."
     let translated = CaptureFixture(selected: source, useAI: true, presentationMode: .translate)
     defer { translated.clean() }
@@ -376,9 +435,13 @@ func dictionaryTranslationChecks() async throws {
                        "Translate lost a captured paragraph in the editable draft")
     try requireCapture(translated.paragraphRequests.count == 1
                        && translated.paragraphRequests[0].sourceText == source
+                       && translated.paragraphRequests[0].sourceLanguage?.rawValue == "en"
+                       && translated.paragraphRequests[0].targetLanguage?.rawValue == "zh"
                        && !translated.paragraphRequests[0].includeSegmentation
                        && !translated.paragraphRequests[0].includeReadings,
                        "Translate failed to request only the full source paragraph")
+    try requireCapture(AppStateStore(defaults: translated.defaults).dictionaryTargetLanguage == "zh",
+                       "Automatic English-to-English correction was not published and persisted")
     try requireCapture(translated.transport.requests.isEmpty && translated.enrichmentCount == 0,
                        "Translate contacted a dictionary transport or enriched a word")
     try requireCapture(AppStateStore(defaults: translated.defaults).dictionaryPresentationMode == .translate,
@@ -391,6 +454,7 @@ func dictionaryTranslationChecks() async throws {
     translated.coordinator.restoreHistory(.init(id: UUID(), query: source,
                                                  sourceLanguage: .automatic,
                                                  targetLanguage: .japanese,
+                                                 presentationMode: .translate,
                                                  lookedUpAt: Date()))
     try await waitUntil { translated.paragraphRequests.count == 3 }
     try requireCapture(translated.paragraphRequests.last?.sourceText == source
@@ -409,7 +473,7 @@ func dictionaryTranslationChecks() async throws {
     try await draft.start()
     draft.lookupField?.stringValue = "Unsubmitted draft\nwith its final line."
     try draft.click("Switch to Translate")
-    try await waitUntil { draft.labels.contains("Translated: Unsubmitted draft with its final line.") }
+    try await waitUntil { draft.labels.contains("Translated: Unsubmitted draft\nwith its final line.") }
     try requireCapture(draft.paragraphRequests.last?.sourceText == "Unsubmitted draft\nwith its final line.",
                        "Mode switch used the submitted query instead of the draft")
     try draft.click("Switch to Dictionary")
@@ -537,6 +601,24 @@ func dictionaryTranslationChecks() async throws {
                        "A canceled Dictionary response overwrote Translate")
     dictionaryRace.clean()
 
+    let sourceCorrection = CaptureFixture(selected: "A short paragraph.", useAI: true,
+                                          presentationMode: .translate)
+    defer { sourceCorrection.clean() }
+    try await sourceCorrection.start()
+    try await waitUntil { sourceCorrection.paragraphRequests.count == 1 }
+    try sourceCorrection.chooseLanguage("zh", source: true)
+    try await waitUntil { sourceCorrection.paragraphRequests.count == 2 }
+    try requireCapture(sourceCorrection.paragraphRequests.last?.sourceLanguage?.rawValue == "zh"
+                       && sourceCorrection.paragraphRequests.last?.targetLanguage?.rawValue == "en"
+                       && sourceCorrection.historyStore.items.first?.sourceLanguage == "zh"
+                       && sourceCorrection.historyStore.items.first?.targetLanguage == "en",
+                       "Manual source correction translated Chinese into Chinese or saved stale languages")
+    try sourceCorrection.chooseLanguage("es")
+    try await waitUntil { sourceCorrection.paragraphRequests.count == 3 }
+    try requireCapture(sourceCorrection.paragraphRequests.last?.targetLanguage?.rawValue == "es",
+                       "A distinct manually selected target was not retained")
+    sourceCorrection.clean()
+
     for disable in [false, true] {
         let closed = CaptureFixture(selected: "Pending source", useAI: true, presentationMode: .translate)
         defer { closed.clean() }
@@ -554,21 +636,91 @@ func dictionaryTranslationChecks() async throws {
 }
 
 @MainActor
+private func dictionaryHistoryReopenChecks() async throws {
+    for accessibility in [true, false] {
+        let fixture = CaptureFixture(selected: nil, accessibility: accessibility, useAI: true,
+                                     presentationMode: .dictionary)
+        defer { fixture.clean() }
+        _ = fixture.historyStore.record(query: "older", sourceLanguage: "auto", targetLanguage: "ja",
+                                        at: Date(timeIntervalSince1970: 100))
+        _ = fixture.historyStore.record(query: "Me gusta aprender idiomas.", sourceLanguage: "es",
+                                        targetLanguage: "en", presentationMode: .translate,
+                                        at: Date(timeIntervalSince1970: 200))
+        try await fixture.start()
+        try await waitUntil { fixture.labels.contains("Translated: Me gusta aprender idiomas.") }
+        try requireCapture(fixture.panel.currentDraft == "Me gusta aprender idiomas."
+                           && fixture.controls.contains { $0.accessibilityLabel() == "Switch to Dictionary" }
+                           && AppStateStore(defaults: fixture.defaults).dictionaryPresentationMode == .translate,
+                           "No-selection reopening did not restore the latest entry's saved Translate mode")
+        try requireCapture(fixture.paragraphRequests.last?.sourceLanguage?.rawValue == "es"
+                           && fixture.paragraphRequests.last?.targetLanguage?.rawValue == "en"
+                           && fixture.transport.requests.isEmpty && fixture.historyStore.items.count == 2,
+                           "No-selection history restoration lost languages, repeated history, or launched dictionary work")
+        try requireCapture(fixture.events == (accessibility ? ["selection"] : []),
+                           "History restoration required a permission or another capture stage")
+        fixture.clean()
+    }
+
+    let dictionary = CaptureFixture(selected: nil, presentationMode: .translate)
+    defer { dictionary.clean() }
+    _ = dictionary.historyStore.record(query: "筛选", sourceLanguage: "zh", targetLanguage: "en")
+    try await dictionary.start()
+    try await waitUntil { !dictionary.transport.requests.isEmpty }
+    try requireCapture(dictionary.panel.currentDraft == "筛选"
+                       && dictionary.controls.contains { $0.accessibilityLabel() == "Switch to Translate" }
+                       && AppStateStore(defaults: dictionary.defaults).dictionaryPresentationMode == .dictionary,
+                       "Saved Dictionary history inherited the current global Translate mode")
+    dictionary.clean()
+
+    let empty = CaptureFixture(selected: nil, presentationMode: .translate)
+    defer { empty.clean() }
+    try await empty.start()
+    try requireCapture(empty.panel.currentDraft.isEmpty && empty.window?.firstResponder is NSTextView
+                       && empty.controls.contains { $0.accessibilityLabel() == "Switch to Dictionary" },
+                       "Empty history did not open focused typing in the current mode")
+    empty.clean()
+
+    let switched = CaptureFixture(selected: "hello", useAI: true)
+    defer { switched.clean() }
+    try await switched.start()
+    try switched.click("Switch to Translate")
+    try await waitUntil { switched.labels.contains("Translated: hello") }
+    try requireCapture(switched.historyStore.items.first?.presentationMode == .translate,
+                       "Switching modes did not remember the latest entry's new mode")
+    try switched.chooseLanguage("es")
+    try await waitUntil { switched.paragraphRequests.last?.targetLanguage?.rawValue == "es" }
+    try requireCapture(switched.historyStore.items.first?.targetLanguage == "es",
+                       "Changing translation target did not update the latest history preference")
+    switched.coordinator.cancel()
+    switched.selected = nil
+    try await switched.start()
+    try requireCapture(switched.panel.currentDraft == "hello"
+                       && switched.controls.contains { $0.accessibilityLabel() == "Switch to Dictionary" },
+                       "Mode-switch history did not reopen Translate after dismissing")
+    try switched.submit("Newest submitted lookup.")
+    try await waitUntil { switched.historyStore.items.first?.query == "Newest submitted lookup." }
+    switched.coordinator.cancel()
+    try await switched.start()
+    try requireCapture(switched.panel.currentDraft == "Newest submitted lookup.",
+                       "No-selection reopening ignored a newer submitted query")
+    switched.clean()
+    print("PASS no-selection latest-history mode/languages, missing permission, empty history, and mode/target edits")
+}
+
+@MainActor
 func dictionaryCaptureChecks() async throws {
-    let cases: [(String?, String, Data?, Bool, Bool, [String], String?)] = [
-        ("hello", "ignored", Data([1]), true, true, ["selection"], "hello"),
-        ("  \n", "hola", Data([1]), true, true, ["selection", "screenshot", "OCR"], "hola"),
-        (nil, "  \n", Data([1]), true, true, ["selection", "screenshot", "OCR"], nil),
-        (nil, "ignored", nil, true, true, ["selection", "screenshot"], nil),
-        (nil, "ignored", nil, false, false, [], nil),
-        (nil, "你好", Data([1]), false, true, ["screenshot", "OCR"], "你好"),
+    try await dictionaryHistoryReopenChecks()
+    let cases: [(String?, Bool, [String], String?)] = [
+        ("hello", true, ["selection"], "hello"),
+        ("  \n", true, ["selection"], nil),
+        (nil, true, ["selection"], nil),
+        (nil, false, [], nil),
     ]
-    for (selected, recognized, screenshot, accessibility, screen, events, query) in cases {
-        let fixture = CaptureFixture(selected: selected, recognized: recognized, screenshot: screenshot,
-                                     accessibility: accessibility, screen: screen)
+    for (selected, accessibility, events, query) in cases {
+        let fixture = CaptureFixture(selected: selected, accessibility: accessibility)
         defer { fixture.clean() }
         try await fixture.start()
-        try requireCapture(fixture.events == events, "Fallback stages were not exclusive/in order: \(fixture.events)")
+        try requireCapture(fixture.events == events, "Dictionary performed an unexpected capture: \(fixture.events)")
         try requireCapture(fixture.lookupField?.stringValue == (query ?? ""), "Captured text did not reach lookup field")
         if query == nil {
             try requireCapture(fixture.window?.firstResponder is NSTextView, "Manual fallback did not focus typing")
@@ -582,14 +734,6 @@ func dictionaryCaptureChecks() async throws {
         }
         fixture.clean()
     }
-    let error = CaptureFixture(selected: nil)
-    defer { error.clean() }
-    error.captureError = true
-    try await error.start()
-    try requireCapture(error.events == ["selection", "screenshot"] && error.lookupField?.stringValue == "",
-                       "Capture failure must stop at focused manual input")
-    try requireCapture(error.labels.contains { $0.contains("capture failed") }, "Missing capture-error explanation")
-    error.clean()
     let miss = CaptureFixture(selected: "unknownfixtureword", transport: .init(status: 404))
     defer { miss.clean() }
     try await miss.start()
@@ -604,8 +748,8 @@ func dictionaryCaptureChecks() async throws {
     canceled.coordinator.cancel()
     try await Task.sleep(nanoseconds: 140_000_000)
     try requireCapture(!canceled.panel.isVisible && canceled.events == ["selection"],
-                       "Canceled capture reopened the panel or advanced to OCR")
-    print("PASS exclusive selection → screenshot → OCR → typing fallbacks and cancellation")
+                       "Canceled capture reopened the panel")
+    print("PASS selected-text capture, focused empty-history input, permissions, and cancellation")
 
     let reopened = CaptureFixture(selected: "old lookup")
     defer { reopened.clean() }
@@ -620,18 +764,19 @@ func dictionaryCaptureChecks() async throws {
                        "Reopening a background Dictionary panel skipped the new selection")
     try requireCapture(reopened.coordinator.consumePanelActivation(),
                        "Capturing a new selection did not reactivate the background Dictionary panel")
-    // Without a new selection, reopening preserves an unfinished manual draft
-    // and resumes the panel instead of interrupting it with another crop.
+    // With no new selection, resume the latest historical entry rather than
+    // treating the unfinished local input as a newly submitted query.
     reopened.lookupField?.stringValue = "unfinished draft"
     reopened.selected = nil
     reopened.coordinator.toggle()
-    try await waitUntil { reopened.events.count == 3 }
-    try requireCapture(reopened.lookupField?.stringValue == "unfinished draft",
-                       "Reopening without a selection discarded the current draft")
+    try await waitUntil { reopened.events.count == 3
+        && reopened.lookupField?.stringValue == "new selected text" }
+    try requireCapture(reopened.lookupField?.stringValue == "new selected text",
+                       "Reopening without a selection did not restore the latest historical entry")
     try requireCapture(reopened.events == ["selection", "selection", "selection"],
                        "Resuming the existing panel unexpectedly opened screenshot selection")
     reopened.clean()
-    print("PASS background panel captures a new selection before taking focus and preserves an unsubmitted draft")
+    print("PASS background panel captures a new selection before taking focus and restores the latest history")
 
     let sentence = CaptureFixture(selected: "I enjoy learning languages.", useAI: true, targetLanguage: "zh")
     defer { sentence.clean() }
@@ -1015,7 +1160,7 @@ func dictionaryScreenshotChecks() async throws {
     let changeCount = NSPasteboard.general.changeCount
     var paths: [String] = []
     let success = ScreenshotService(processRunner: { arguments in
-        try requireCapture(!arguments.contains("-c"), "Dictionary screenshot must not write clipboard")
+        try requireCapture(!arguments.contains("-c"), "Preserved screenshot must not write clipboard")
         let path = arguments.last!
         paths.append(path)
         try png.write(to: URL(fileURLWithPath: path))

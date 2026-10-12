@@ -46,7 +46,11 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
     private var onCreate: CreateHandler?
     private var onUpdate: UpdateHandler?
     private var onDelete: DeleteHandler?
+    private var onCancel: (() -> Void)?
     private var isResolving = false
+    private lazy var clickAwayDismissal = TransientPanelDismissal(window: panel) { [weak self] in
+        self?.cancelFromUser()
+    }
 
     var isVisible: Bool { panel.isVisible }
 
@@ -71,13 +75,15 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
         onLookup: @escaping (String) -> Void,
         onCreate: @escaping CreateHandler,
         onUpdate: @escaping UpdateHandler,
-        onDelete: @escaping DeleteHandler
+        onDelete: @escaping DeleteHandler,
+        onCancel: @escaping () -> Void = {}
     ) {
         self.entries = entries
         self.onLookup = onLookup
         self.onCreate = onCreate
         self.onUpdate = onUpdate
         self.onDelete = onDelete
+        self.onCancel = onCancel
         setResolving(false)
         lookupField.stringValue = ""
         keyField.stringValue = ""
@@ -89,6 +95,7 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(lookupField)
+        clickAwayDismissal.start()
         assert(lookupField.isEditable, "Insert lookup must be editable whenever the panel opens.")
     }
 
@@ -123,19 +130,24 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
     }
 
     func dismiss() {
+        clickAwayDismissal.stop()
         panel.orderOut(nil)
         setResolving(false)
         onLookup = nil
         onCreate = nil
         onUpdate = nil
         onDelete = nil
+        onCancel = nil
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard !isResolving else {
-            return
-        }
+        clickAwayDismissal.handleResignKey()
+    }
+
+    private func cancelFromUser() {
+        let callback = onCancel
         dismiss()
+        callback?()
     }
 
     func controlTextDidChange(_ notification: Notification) {
@@ -200,7 +212,7 @@ final class InsertPanelController: NSObject, NSTextFieldDelegate, NSSearchFieldD
         doCommandBy commandSelector: Selector
     ) -> Bool {
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            dismiss()
+            cancelFromUser()
             return true
         }
         guard commandSelector == #selector(NSResponder.insertNewline(_:)) else {
