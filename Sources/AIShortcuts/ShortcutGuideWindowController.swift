@@ -12,6 +12,9 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
     private let closeButton = NSButton()
     private let scrollView = NSScrollView()
     private let textView = NSTextView()
+    private lazy var clickAwayDismissal = TransientPanelDismissal(window: panel) { [weak self] in
+        self?.dismiss()
+    }
 
     var isVisible: Bool { panel.isVisible }
 
@@ -23,6 +26,7 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
             defer: false
         )
         super.init()
+        panel.owner = self
         configureWindow()
         configureContent()
     }
@@ -33,15 +37,16 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
         panel.center()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        clickAwayDismissal.start()
     }
 
     func dismiss() {
+        clickAwayDismissal.stop()
         panel.orderOut(nil)
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        // Keep the guide available while the owner switches apps to compare
-        // behavior. It closes only through its close control or Escape.
+        clickAwayDismissal.handleResignKey()
     }
 
     private func configureWindow() {
@@ -248,9 +253,9 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
             )
         case .dictionary:
             return (
-                "Look up a selected word, drag over text to inspect it, or type a word or phrase manually.",
-                "Result · Shows native definitions immediately, with optional target-language translation and focused AI enrichment when configured; visited entries stay available in the panel.",
-                "Selection capture uses Accessibility when available; screen fallback uses Screen Recording; typed lookup works without either permission or an AI provider"
+                "Look up selected text, or reopen the latest lookup when nothing is selected. Press Tab to switch between Dictionary and Translate.",
+                "Result · Restores the last lookup's mode; definitions and optional AI translations remain available, and the lookup field is always editable. Use OCR separately for text in images.",
+                "Selection capture uses Accessibility when available; typed lookup and history work without it. AI translation requires a configured provider"
             )
         }
     }
@@ -261,10 +266,11 @@ final class ShortcutGuideWindowController: NSObject, NSWindowDelegate {
 }
 
 private final class ShortcutGuidePanel: NSPanel {
+    weak var owner: ShortcutGuideWindowController?
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
     override func cancelOperation(_ sender: Any?) {
-        orderOut(nil)
+        owner?.dismiss()
     }
 }

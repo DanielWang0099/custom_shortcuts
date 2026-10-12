@@ -21,7 +21,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // same preparation path as a recently used action.
     private var selectionServiceStorage: SelectionService?
     private var screenshotServiceStorage: ScreenshotService?
-    private var dictionaryScreenshotServiceStorage: ScreenshotService?
     private var finderServiceStorage: FinderSelectionService?
     private var hudStorage: HUDController?
     private var richTextRendererStorage: NativeRichTextRenderer?
@@ -90,15 +89,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return service
     }
 
-    private var dictionaryScreenshotService: ScreenshotService {
-        if let dictionaryScreenshotServiceStorage {
-            return dictionaryScreenshotServiceStorage
-        }
-        let service = ScreenshotService()
-        dictionaryScreenshotServiceStorage = service
-        return service
-    }
-
     private var finderService: FinderSelectionService {
         if let finderServiceStorage {
             return finderServiceStorage
@@ -124,7 +114,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let coordinator = DictionaryCoordinator(
             stateStore: stateStore,
             selectionService: selectionService,
-            screenshotService: dictionaryScreenshotService,
             aiCompletion: makeDictionaryAICompletion(),
             onOpenPermissionSettings: { [weak self] in
                 self?.openDictionaryPermissionSettings()
@@ -350,7 +339,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         networkPreconnectTask?.cancel()
         memoryPressureSource?.cancel()
         dictionaryCoordinatorStorage?.releaseResources()
-        dictionaryScreenshotServiceStorage = nil
         apiClient.suspendConnection()
         endLatencyActivity()
         hotKeyManager?.invalidate()
@@ -637,7 +625,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if dictionaryCoordinatorStorage?.hasActiveWork != true {
             dictionaryCoordinatorStorage?.releaseResources()
             dictionaryCoordinatorStorage = nil
-            dictionaryScreenshotServiceStorage = nil
         }
         if !isBusy {
             selectionServiceStorage = nil
@@ -1157,6 +1144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return [] }
                 try self.insertLibrary.delete(id: id)
                 return self.allInsertionEntries()
+            },
+            onCancel: { [weak self] in
+                guard let self, self.currentAction == .insert else { return }
+                self.cancelCurrentOperation(showFeedback: false)
             }
         )
     }
@@ -1199,6 +1190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         do {
             let completion = try await callAPI(prompt: prompt)
+            guard !Task.isCancelled, insertPanel.isVisible else { return }
             let response = completion.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let index = Int(response), entries.indices.contains(index) else {
                 insertPanel.showLookupError("No reasonable matching key found")
@@ -1544,13 +1536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openDictionaryPermissionSettings() {
-        if !AXIsProcessTrusted() {
-            NSWorkspace.shared.open(AppConfiguration.accessibilitySettingsURL)
-        } else if !CGPreflightScreenCaptureAccess() {
-            NSWorkspace.shared.open(AppConfiguration.screenRecordingSettingsURL)
-        } else {
-            NSWorkspace.shared.open(AppConfiguration.screenRecordingSettingsURL)
-        }
+        NSWorkspace.shared.open(AppConfiguration.accessibilitySettingsURL)
     }
 
     private func captureAndRunTextAction(_ action: AIShortcutAction) async {

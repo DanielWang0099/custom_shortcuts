@@ -45,7 +45,7 @@ enum DictionaryTogglePolicy {
     }
 }
 
-/// Coordinates Dictionary's capture fallbacks, native results, structured
+/// Coordinates Dictionary's selected-text capture, native results, structured
 /// dictionary lookups, and optional AI enrichment. Dictionary work deliberately
 /// has its own lifecycle: a slow network request must never hold the global
 /// shortcut operation lock used by the other actions.
@@ -53,19 +53,11 @@ enum DictionaryTogglePolicy {
 final class DictionaryCoordinator {
     struct CaptureDependencies {
         let accessibilityTrusted: @MainActor () -> Bool
-        let screenRecordingGranted: @MainActor () -> Bool
         let selectedText: @MainActor () async -> String?
-        let screenshotPNG: @MainActor () async throws -> Data?
-        let recognizeText: @MainActor (Data) async throws -> String
-        let cancelScreenshot: @MainActor () -> Void
 
-        static func live(
-            selectionService: SelectionService,
-            screenshotService: ScreenshotService
-        ) -> Self {
+        static func live(selectionService: SelectionService) -> Self {
             Self(
                 accessibilityTrusted: { AXIsProcessTrusted() },
-                screenRecordingGranted: { CGPreflightScreenCaptureAccess() },
                 selectedText: {
                     guard AXIsProcessTrusted() else {
                         return nil
@@ -73,38 +65,16 @@ final class DictionaryCoordinator {
                     return await selectionService
                         .captureSelection(preserveClipboard: true)?
                         .text
-                },
-                screenshotPNG: {
-                    guard CGPreflightScreenCaptureAccess() else {
-                        return nil
-                    }
-                    return try await screenshotService
-                        .captureSelection(preserveClipboard: true)?
-                        .pngData
-                },
-                recognizeText: { data in
-                    try await DictionaryOCRService.recognizeText(from: data)
-                },
-                cancelScreenshot: {
-                    screenshotService.cancelCapture()
                 }
             )
         }
 
         init(
             accessibilityTrusted: @escaping @MainActor () -> Bool,
-            screenRecordingGranted: @escaping @MainActor () -> Bool,
-            selectedText: @escaping @MainActor () async -> String?,
-            screenshotPNG: @escaping @MainActor () async throws -> Data?,
-            recognizeText: @escaping @MainActor (Data) async throws -> String,
-            cancelScreenshot: @escaping @MainActor () -> Void = {}
+            selectedText: @escaping @MainActor () async -> String?
         ) {
             self.accessibilityTrusted = accessibilityTrusted
-            self.screenRecordingGranted = screenRecordingGranted
             self.selectedText = selectedText
-            self.screenshotPNG = screenshotPNG
-            self.recognizeText = recognizeText
-            self.cancelScreenshot = cancelScreenshot
         }
     }
 
@@ -159,6 +129,7 @@ final class DictionaryCoordinator {
     private var aiSegmentationApplied = false
     private var historyError: String?
     private var lastCaptureNotice: String?
+    private var phraseSelectionRange: NSRange?
 
     private var cachedLookups: [String: DictionaryLookupResult] = [:]
     private var inFlightLookups: [String: Task<DictionaryLookupResult, Error>] = [:]
@@ -194,7 +165,6 @@ final class DictionaryCoordinator {
     init(
         stateStore: AppStateStore,
         selectionService: SelectionService,
-        screenshotService: ScreenshotService,
         panel: DictionaryPanelController = DictionaryPanelController(),
         lookupService: DictionaryLookupService = DictionaryLookupService(),
         speechService: DictionarySpeechService = .shared,
@@ -215,8 +185,7 @@ final class DictionaryCoordinator {
         self.speechService = speechService
         self.historyStore = historyStore
         self.captureDependencies = captureDependencies ?? .live(
-            selectionService: selectionService,
-            screenshotService: screenshotService
+            selectionService: selectionService
         )
         self.aiCompletion = aiCompletion
         self.nativeRefinement = nativeRefinement
@@ -278,9 +247,10 @@ final class DictionaryCoordinator {
             if let selected, SelectionCapturePolicy.containsMeaningfulText(selected) {
                 self.sourceOverride = .automatic
                 self.beginLookup(for: selected, generation: requestGeneration)
+            } else {
+                self.reopenLatestHistoryOrManual(generation: requestGeneration)
             }
-            // Resume the draft when there is no new selection. Both paths
-            // activate only after capture has finished in the source app.
+            // Activate only after capture has finished in the source app.
             if !NSApp.isActive {
                 self.panelActivationDeadline = Date().addingTimeInterval(1)
             }
@@ -292,7 +262,7 @@ final class DictionaryCoordinator {
         cancel(dismissPanel: false)
         resetContext()
         captureTask = Task { @MainActor [weak self] in
-            await self?.runCaptureChain()
+            await self?.runSelectionCapture()
         }
     }
 
@@ -302,7 +272,6 @@ final class DictionaryCoordinator {
     func cancel(dismissPanel: Bool = true) {
         generation &+= 1
         wordGeneration &+= 1
-        captureDependencies.cancelScreenshot()
         captureTask?.cancel()
         lookupTask?.cancel()
         contextTask?.cancel()
@@ -333,9 +302,9 @@ final class DictionaryCoordinator {
         panel.releaseResources()
     }
 
-    // MARK: Capture chain
+    // MARK: Selection capture
 
-    private func runCaptureChain() async {
+    private func runSelectionCapture() async {
         let requestGeneration = generation
         defer {
             if generation == requestGeneration {
@@ -357,61 +326,30 @@ final class DictionaryCoordinator {
             }
         }
 
-        guard captureDependencies.screenRecordingGranted() else {
-            showManual(
-                notice: accessibilityGranted
-                    ? "No text captured. Type below, or enable Screen Recording for screenshot lookup."
-                    : "Capture needs Accessibility for selected text and Screen Recording for screenshots. You can type below.",
-                generation: requestGeneration
-            )
-            return
-        }
+        reopenLatestHistoryOrManual(generation: requestGeneration)
+    }
 
-        do {
-            guard let pngData = try await captureDependencies.screenshotPNG() else {
-                showManual(
-                    notice: accessibilityGranted
-                        ? "No text captured. Type a word or sentence to look up."
-                        : "Selected-text capture needs Accessibility permission. Type below or open capture settings.",
-                    generation: requestGeneration
-                )
-                return
-            }
-            guard generation == requestGeneration, !Task.isCancelled else {
-                return
-            }
-            let recognized = try await captureDependencies.recognizeText(pngData)
-            guard generation == requestGeneration, !Task.isCancelled else {
-                return
-            }
-            if SelectionCapturePolicy.containsMeaningfulText(recognized) {
-                beginLookup(for: recognized, generation: requestGeneration)
-            } else {
-                showManual(
-                    notice: accessibilityGranted
-                        ? "No readable text was found. Type a word or sentence to look up."
-                        : "No readable text captured. Enable Accessibility for selections, or type below.",
-                    generation: requestGeneration
-                )
-            }
-        } catch is CancellationError {
+    private func reopenLatestHistoryOrManual(generation requestGeneration: Int) {
+        guard generation == requestGeneration, !Task.isCancelled else { return }
+        if let latest = panelHistoryItems().first {
+            restoreHistory(latest)
             return
-        } catch {
-            guard generation == requestGeneration, !Task.isCancelled else {
-                return
-            }
-            showManual(
-                notice: "Screenshot text capture failed. Type a word or sentence to look up, or check capture permissions.",
-                generation: requestGeneration
-            )
         }
+        showManual(
+            notice: captureDependencies.accessibilityTrusted()
+                ? "Type a word or sentence to look up."
+                : "Selected-text capture needs Accessibility permission. Type below or open capture settings.",
+            generation: requestGeneration
+        )
     }
 
     private func showManual(notice: String, generation requestGeneration: Int) {
         guard generation == requestGeneration, !Task.isCancelled else {
             return
         }
+        panel.prepareForNewLookup()
         query = ""
+        phraseSelectionRange = nil
         mode = .manual
         sentenceTokens.removeAll()
         activeToken = nil
@@ -457,7 +395,9 @@ final class DictionaryCoordinator {
         generation &+= 1
         wordGeneration &+= 1
         let lookupGeneration = generation
+        panel.prepareForNewLookup()
         query = rawQuery
+        phraseSelectionRange = nil
         currentError = nil
         contextError = nil
         aiSegmentationApplied = false
@@ -471,6 +411,7 @@ final class DictionaryCoordinator {
         )
 
         if presentationMode == .translate {
+            resolveParagraphTargetLanguage()
             mode = .manual
             sentenceTokens.removeAll()
             activeToken = nil
@@ -1052,7 +993,7 @@ final class DictionaryCoordinator {
                     self.nativeRefinementTask = nil
                     let previousToken = self.activeToken
                     self.sentenceTokens = tokens
-                    self.activeToken = Self.remapActiveToken(
+                    self.activeToken = self.remapCurrentSelection(
                         previousToken,
                         in: tokens
                     )
@@ -1099,6 +1040,7 @@ final class DictionaryCoordinator {
         guard presentationMode == .translate,
               !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return }
+        resolveParagraphTargetLanguage()
         let key = paragraphTranslationCacheKey()
         if let cached = paragraphTranslations[key] {
             paragraphTranslation = cached
@@ -1123,7 +1065,7 @@ final class DictionaryCoordinator {
                     targetLanguage: DictionaryLanguage(target.rawValue),
                     includeSegmentation: false,
                     includeReadings: false,
-                    singleParagraph: true
+                    translationOnly: true
                 ))
                 guard self.generation == translationGeneration,
                       self.presentationMode == .translate,
@@ -1222,7 +1164,7 @@ final class DictionaryCoordinator {
         guard refinedPanelTokens != sentenceTokens else { return }
         let previousToken = activeToken
         sentenceTokens = refinedPanelTokens
-        activeToken = Self.remapActiveToken(previousToken, in: refinedPanelTokens)
+        activeToken = remapCurrentSelection(previousToken, in: refinedPanelTokens)
 
         let selectionChanged = Self.selectionChanged(
             from: previousToken,
@@ -1398,7 +1340,7 @@ final class DictionaryCoordinator {
     private func switchPresentationMode(draft: String) {
         presentationMode = presentationMode == .dictionary ? .translate : .dictionary
         stateStore.dictionaryPresentationMode = presentationMode
-        beginLookup(for: draft, recordHistory: false)
+        beginLookup(for: draft)
     }
 
     /// Invalidates the current lookup when the panel's clear control is used.
@@ -1417,11 +1359,12 @@ final class DictionaryCoordinator {
 
         sourceOverride = item.sourceLanguage
         targetLanguage = item.targetLanguage
+        presentationMode = item.presentationMode
+        stateStore.dictionaryPresentationMode = presentationMode
         stateStore.dictionaryTargetLanguage = targetLanguage.rawValue
         historyError = historyStore.storageError?.localizedDescription
         // History restores the complete query and preferences through the
-        // normal lookup pipeline. It must not invoke selection, screenshot,
-        // OCR, or create a second history row.
+        // normal lookup pipeline without selection capture or a second history row.
         beginLookup(for: item.query, recordHistory: false)
     }
 
@@ -1445,7 +1388,8 @@ final class DictionaryCoordinator {
             query: submittedQuery,
             sourceLanguage: sourceOverride.rawValue,
             detectedSourceLanguage: detected,
-            targetLanguage: targetLanguage.rawValue
+            targetLanguage: targetLanguage.rawValue,
+            presentationMode: presentationMode
         )
         handleHistoryStorageErrorIfNeeded()
         refreshHistory()
@@ -1459,6 +1403,7 @@ final class DictionaryCoordinator {
                 sourceLanguage: item.sourceLanguage,
                 detectedSourceLanguage: item.detectedSourceLanguage,
                 targetLanguage: item.targetLanguage,
+                presentationMode: item.presentationMode,
                 lookedUpAt: item.lookedUpAt
             )
         }
@@ -1478,16 +1423,19 @@ final class DictionaryCoordinator {
 
     private func select(_ token: DictionaryPanelToken) {
         guard mode == .sentence, token.isWordToken else { return }
-        guard sentenceTokens.contains(where: {
-            $0.utf16Range == token.utf16Range && $0.text == token.text
-        }) else {
-            return
-        }
+        let source = query as NSString
+        guard token.utf16Range.location != NSNotFound, token.utf16Range.location >= 0,
+              token.utf16Range.length > 0, NSMaxRange(token.utf16Range) <= source.length,
+              source.substring(with: token.utf16Range) == token.text,
+              sentenceTokens.contains(where: { $0.isWordToken && NSIntersectionRange($0.utf16Range, token.utf16Range).length > 0 })
+        else { return }
         cancelWordTasks()
         prefetchTasks.forEach { $0.cancel() }
         prefetchTasks.removeAll()
         wordGeneration &+= 1
         activeToken = token
+        phraseSelectionRange = sentenceTokens.contains(where: { $0.utf16Range == token.utf16Range && $0.text == token.text })
+            ? nil : token.utf16Range
         currentWord = nil
         currentAIAdditions.removeAll()
         currentError = nil
@@ -1506,20 +1454,38 @@ final class DictionaryCoordinator {
         targetLanguage = target
         stateStore.dictionaryTargetLanguage = target.rawValue
         if presentationMode == .translate {
-            beginLookup(for: panel.currentDraft, recordHistory: false)
+            beginLookup(for: panel.currentDraft)
             return
         }
         restartCurrentLookup()
+        if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            recordHistory(for: query)
+        }
     }
 
     private func changeSource(to source: DictionarySourceLanguage) {
         guard source != sourceOverride else { return }
         sourceOverride = source
         if presentationMode == .translate {
-            beginLookup(for: panel.currentDraft, recordHistory: false)
+            beginLookup(for: panel.currentDraft)
             return
         }
         restartCurrentLookup()
+        if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            recordHistory(for: query)
+        }
+    }
+
+    private func resolveParagraphTargetLanguage() {
+        let resolved = DictionaryTranslationLanguagePolicy.targetLanguage(
+            sourceLanguage: sourceOverride.rawValue,
+            detectedSourceLanguage: sourceLanguage.rawValue,
+            preferredTargetLanguage: targetLanguage.rawValue
+        )
+        if let target = DictionaryTargetLanguage(rawValue: resolved), target != targetLanguage {
+            targetLanguage = target
+            stateStore.dictionaryTargetLanguage = target.rawValue
+        }
     }
 
     private func retry() {
@@ -1555,7 +1521,7 @@ final class DictionaryCoordinator {
             probe: wholeInputWordProbe
         ) ? .word : .sentence
         activeToken = mode == .sentence
-            ? Self.remapActiveToken(previousActiveToken, in: sentenceTokens)
+            ? remapCurrentSelection(previousActiveToken, in: sentenceTokens)
             : nil
         sentenceTranslation = nil
         currentWord = nil
@@ -1587,7 +1553,6 @@ final class DictionaryCoordinator {
     }
 
     private func cancelAllTasks() {
-        captureDependencies.cancelScreenshot()
         captureTask?.cancel()
         cancelWordTasks()
         contextTask?.cancel()
@@ -1606,6 +1571,7 @@ final class DictionaryCoordinator {
     }
 
     private func resetContext() {
+        phraseSelectionRange = nil
         query = ""
         sourceOverride = .automatic
         sourceLanguage = .automatic
@@ -1673,14 +1639,15 @@ final class DictionaryCoordinator {
         if mode == .sentence {
             let activeIndex = activeToken.flatMap { token in
                 sentenceTokens.firstIndex(where: {
-                    $0.utf16Range == token.utf16Range && $0.text == token.text
+                    $0.isWordToken && NSIntersectionRange($0.utf16Range, token.utf16Range).length > 0
                 })
             } ?? 0
             sentence = DictionaryPanelSentence(
                 source: query,
                 translation: sentenceTranslation,
                 tokens: sentenceTokens,
-                activeTokenIndex: activeIndex
+                activeTokenIndex: activeIndex,
+                activeRange: activeToken?.utf16Range
             )
         } else {
             sentence = nil
@@ -1983,6 +1950,11 @@ final class DictionaryCoordinator {
             return false
         }
         return NSIntersectionRange(left, right).length > 0
+    }
+
+    private func remapCurrentSelection(_ previous: DictionaryPanelToken?, in tokens: [DictionaryPanelToken]) -> DictionaryPanelToken? {
+        if let previous, phraseSelectionRange == previous.utf16Range { return previous }
+        return Self.remapActiveToken(previous, in: tokens)
     }
 
     private static func remapActiveToken(

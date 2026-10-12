@@ -35,6 +35,7 @@ final class HUDController {
     private var isBusyPresentation = false
     private var dismissOnMouseExit = false
     private var mouseExitPoller: DispatchSourceTimer?
+    private var resultClickAwayDismissal: TransientPanelDismissal?
 
     var isVisible: Bool {
         panel?.isVisible ?? false
@@ -313,6 +314,14 @@ final class HUDController {
                 self.isBusyPresentation = false
             }
         } else {
+            let clickAway = TransientPanelDismissal(
+                window: hudPanel,
+                monitorsOtherApplications: true
+            ) { [weak self] in
+                self?.dismiss()
+            }
+            resultClickAwayDismissal = clickAway
+            clickAway.start()
             beginMouseExitDismissal(
                 generation: thisGeneration,
                 hudPanel: hudPanel,
@@ -413,6 +422,8 @@ final class HUDController {
     }
 
     private func stopMouseExitDismissal() {
+        resultClickAwayDismissal?.stop()
+        resultClickAwayDismissal = nil
         mouseExitPoller?.cancel()
         mouseExitPoller = nil
         dismissOnMouseExit = false

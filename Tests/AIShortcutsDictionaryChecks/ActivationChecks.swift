@@ -157,7 +157,6 @@ func dictionaryActivationChecks() async throws {
     let selectionState = ActivationSelectionState()
     let capture = DictionaryCoordinator.CaptureDependencies(
         accessibilityTrusted: { true },
-        screenRecordingGranted: { false },
         selectedText: { @MainActor in
             selectionState.calls += 1
             while !selectionState.allow {
@@ -167,14 +166,11 @@ func dictionaryActivationChecks() async throws {
                 try? await Task.sleep(nanoseconds: 10_000_000)
             }
             return "first press"
-        },
-        screenshotPNG: { nil },
-        recognizeText: { _ in "" }
+        }
     )
     let coordinator = DictionaryCoordinator(
         stateStore: AppStateStore(defaults: defaults),
         selectionService: SelectionService(),
-        screenshotService: ScreenshotService(),
         panel: panel,
         lookupService: DictionaryLookupService(
             transport: ActivationTransport(),

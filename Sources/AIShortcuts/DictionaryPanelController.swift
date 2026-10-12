@@ -114,11 +114,6 @@ public enum DictionaryPanelMode: Equatable {
     case sentence
 }
 
-public enum DictionaryPresentationMode: String, Equatable, Sendable {
-    case dictionary
-    case translate
-}
-
 /// Controls how the panel is presented. Production uses `.active`; the
 /// offscreen mode is for native UI fixtures that must exercise rendering and
 /// focus without activating or flashing the user's desktop.
@@ -244,17 +239,20 @@ public struct DictionaryPanelSentence: Equatable {
     public let translation: String?
     public let tokens: [DictionaryPanelToken]
     public let activeTokenIndex: Int
+    public let activeRange: NSRange?
 
     public init(
         source: String,
         translation: String? = nil,
         tokens: [DictionaryPanelToken] = [],
-        activeTokenIndex: Int = 0
+        activeTokenIndex: Int = 0,
+        activeRange: NSRange? = nil
     ) {
         self.source = source
         self.translation = translation
         self.tokens = tokens
         self.activeTokenIndex = max(0, min(activeTokenIndex, max(0, tokens.count - 1)))
+        self.activeRange = activeRange
     }
 }
 
@@ -323,6 +321,7 @@ public struct DictionaryPanelHistoryItem: Identifiable, Equatable, Sendable {
     public let sourceLanguage: DictionarySourceLanguage
     public let detectedSourceLanguage: DictionarySourceLanguage?
     public let targetLanguage: DictionaryTargetLanguage
+    public let presentationMode: DictionaryPresentationMode
     public let lookedUpAt: Date
 
     public init(
@@ -331,6 +330,7 @@ public struct DictionaryPanelHistoryItem: Identifiable, Equatable, Sendable {
         sourceLanguage: String = DictionarySourceLanguage.automatic.rawValue,
         detectedSourceLanguage: String? = nil,
         targetLanguage: String = DictionaryTargetLanguage.english.rawValue,
+        presentationMode: DictionaryPresentationMode = .dictionary,
         lookedUpAt: Date = Date()
     ) {
         self.id = id
@@ -342,6 +342,7 @@ public struct DictionaryPanelHistoryItem: Identifiable, Equatable, Sendable {
             self.detectedSourceLanguage = nil
         }
         self.targetLanguage = DictionaryTargetLanguage(rawValue: targetLanguage) ?? .english
+        self.presentationMode = presentationMode
         self.lookedUpAt = lookedUpAt
     }
 
@@ -351,6 +352,7 @@ public struct DictionaryPanelHistoryItem: Identifiable, Equatable, Sendable {
         sourceLanguage: DictionarySourceLanguage,
         detectedSourceLanguage: DictionarySourceLanguage? = nil,
         targetLanguage: DictionaryTargetLanguage,
+        presentationMode: DictionaryPresentationMode = .dictionary,
         lookedUpAt: Date = Date()
     ) {
         self.id = id
@@ -358,6 +360,7 @@ public struct DictionaryPanelHistoryItem: Identifiable, Equatable, Sendable {
         self.sourceLanguage = sourceLanguage
         self.detectedSourceLanguage = detectedSourceLanguage
         self.targetLanguage = targetLanguage
+        self.presentationMode = presentationMode
         self.lookedUpAt = lookedUpAt
     }
 }
@@ -542,6 +545,33 @@ private final class DictionaryPanelSurfaceView: NSView {
     override var isFlipped: Bool { true }
 }
 
+private final class DictionarySearchSurface: NSView {
+    var onHover: ((Bool) -> Void)?
+    var lineOpacity: CGFloat = 0
+    private var area: NSTrackingArea?
+    override var isFlipped: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area { removeTrackingArea(area) }
+        let next = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(next)
+        area = next
+    }
+    override func mouseEntered(with event: NSEvent) { onHover?(true) }
+    override func mouseExited(with event: NSEvent) { onHover?(false) }
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if lineOpacity > 0 {
+            ShortcutUIStyle.contentBorderColor.withAlphaComponent(
+                ShortcutUIStyle.contentBorderColor.alphaComponent * lineOpacity
+            ).setFill()
+            NSRect(x: 0, y: bounds.midY, width: bounds.width, height: 1).fill()
+        }
+    }
+}
+
 /// Borderless native buttons still need feedback when the pointer is over
 /// them. This keeps hover treatment inside the established graphite/purple
 /// palette while leaving AppKit's keyboard focus ring available.
@@ -618,6 +648,8 @@ private final class DictionaryHoverButton: NSButton {
 }
 
 private final class DictionaryLanguagePopupCell: NSPopUpButtonCell {
+    var compactTitle: String?
+
     override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
         let background = NSBezierPath(roundedRect: cellFrame.insetBy(dx: 0.5, dy: 0.5), xRadius: 8, yRadius: 8)
         (isHighlighted ? ShortcutUIStyle.accentColor.withAlphaComponent(0.22) : ShortcutUIStyle.raisedSurfaceColor).setFill()
@@ -628,7 +660,7 @@ private final class DictionaryLanguagePopupCell: NSPopUpButtonCell {
         let font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
-        let text = NSAttributedString(string: title, attributes: [
+        let text = NSAttributedString(string: compactTitle ?? title, attributes: [
             .font: font, .foregroundColor: ShortcutUIStyle.primaryTextColor, .paragraphStyle: paragraph,
         ])
         let height = ceil(font.ascender - font.descender)
@@ -718,6 +750,8 @@ private final class DictionarySentenceTextView: NSTextView {
     private let tokens: [DictionaryPanelToken]
     private let onSelect: (DictionaryPanelToken) -> Void
     private var activeRange: NSRange?
+    private var dragStartIndex: Int?
+    private var dragEndIndex: Int?
 
     override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
         tokens = []
@@ -729,6 +763,7 @@ private final class DictionarySentenceTextView: NSTextView {
         tokens: [DictionaryPanelToken],
         activeIndex: Int,
         source: String,
+        selectedRange: NSRange? = nil,
         onSelect: @escaping (DictionaryPanelToken) -> Void
     ) {
         self.tokens = tokens
@@ -762,7 +797,7 @@ private final class DictionarySentenceTextView: NSTextView {
             .foregroundColor: ShortcutUIStyle.primaryTextColor,
         ]
         setAccessibilityLabel("Sentence source")
-        setAccessibilityHelp("Select a word in the sentence to look it up.")
+        setAccessibilityHelp("Click a word or drag across words to look up a phrase.")
         setAccessibilityValue(source)
 
         let paragraph = NSMutableParagraphStyle()
@@ -806,6 +841,8 @@ private final class DictionarySentenceTextView: NSTextView {
             attributed.setAttributes(attributes, range: range)
         }
         textStorage.setAttributedString(attributed)
+        if let selectedRange, selectedRange.location != NSNotFound,
+           NSMaxRange(selectedRange) <= sourceNSString.length { activeRange = selectedRange }
     }
 
     @available(*, unavailable)
@@ -894,7 +931,40 @@ private final class DictionarySentenceTextView: NSTextView {
               !tokens[number.intValue].isWhitespace, !tokens[number.intValue].isPunctuation
         else { return }
 
-        onSelect(tokens[number.intValue])
+        window?.makeFirstResponder(self)
+        dragStartIndex = number.intValue
+        dragEndIndex = number.intValue
+        activeRange = tokens[number.intValue].utf16Range
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = dragStartIndex else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let character = characterIndexForInsertion(at: point)
+        let words = tokens.indices.filter { !tokens[$0].isWhitespace && !tokens[$0].isPunctuation }
+        let containingWord = words.first { NSLocationInRange(character, tokens[$0].utf16Range) }
+        guard let end = containingWord ?? words.min(by: {
+            abs(tokens[$0].utf16Range.location - character) < abs(tokens[$1].utf16Range.location - character)
+        }) else { return }
+        dragEndIndex = end
+        activeRange = NSUnionRange(tokens[start].utf16Range, tokens[end].utf16Range)
+        needsDisplay = true
+        _ = autoscroll(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let start = dragStartIndex, let end = dragEndIndex else { return }
+        dragStartIndex = nil
+        dragEndIndex = nil
+        if start == end {
+            onSelect(tokens[start])
+        } else {
+            let range = NSUnionRange(tokens[start].utf16Range, tokens[end].utf16Range)
+            let phrase = (string as NSString).substring(with: range)
+            onSelect(DictionaryPanelToken(text: phrase, utf16Range: range, headword: phrase,
+                                          sourceLanguage: DictionaryLanguageService.detect(phrase)))
+        }
     }
 }
 
@@ -1241,7 +1311,8 @@ private final class DictionaryHistoryPopoverController: NSViewController {
             formatter.timeStyle = .short
         }
         let source = item.sourceLanguage.isAutomatic ? (item.detectedSourceLanguage ?? .automatic) : item.sourceLanguage
-        return "\(source.shortDisplayName.uppercased()) → \(item.targetLanguage.rawValue.uppercased()) · \(formatter.string(from: item.lookedUpAt))"
+        let mode = item.presentationMode == .translate ? "Translate · " : ""
+        return "\(mode)\(source.shortDisplayName.uppercased()) → \(item.targetLanguage.rawValue.uppercased()) · \(formatter.string(from: item.lookedUpAt))"
     }
 
     private static func fullMetadata(for item: DictionaryPanelHistoryItem) -> String {
@@ -1249,7 +1320,8 @@ private final class DictionaryHistoryPopoverController: NSViewController {
         formatter.dateStyle = .full
         formatter.timeStyle = .medium
         let source = item.sourceLanguage.isAutomatic ? (item.detectedSourceLanguage ?? .automatic) : item.sourceLanguage
-        return "\(source.displayName) → \(item.targetLanguage.displayName) · \(formatter.string(from: item.lookedUpAt))"
+        let mode = item.presentationMode == .translate ? "Translate" : "Dictionary"
+        return "\(mode) · \(source.displayName) → \(item.targetLanguage.displayName) · \(formatter.string(from: item.lookedUpAt))"
     }
 
 }
@@ -1257,7 +1329,7 @@ private final class DictionaryHistoryPopoverController: NSViewController {
 // MARK: - Dictionary panel controller
 
 @MainActor
-public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
+public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTextViewDelegate {
     private let presentationMode: DictionaryPanelPresentationMode
     private let placementClock: () -> TimeInterval
     private let screenGeometryProvider: () -> [DictionaryPanelScreenGeometry]
@@ -1272,7 +1344,14 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
     private let targetPopup: NSPopUpButton
     private let languageArrow = NSTextField(labelWithString: "→")
     private let closeButton: NSButton
-    private let searchSurface: NSView
+    private let searchSurface: DictionarySearchSurface
+    private var isSearchHovered = false
+    private var searchExpansion: CGFloat = 1
+    private var searchAnimationTarget: CGFloat?
+    private var searchAnimationTask: Task<Void, Never>?
+    private let translationSourceEditor = NSTextView()
+    private var translationSourceDraft: String?
+    private var sourceEditTask: Task<Void, Never>?
     private let lookupField: NSTextField
     private let lookupButton: NSButton
     private let clearButton: NSButton
@@ -1297,6 +1376,13 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
     private var historyClearHandler: (() -> Void)?
     private var historyItems: [DictionaryPanelHistoryItem] = []
     private var historyError: String?
+    private lazy var clickAwayDismissal = TransientPanelDismissal(
+        window: panel,
+        relatedWindows: { [weak self] in
+            self?.historyPopover?.contentViewController?.view.window.map { [$0] } ?? []
+        },
+        onDismiss: { [weak self] in self?.dismissFromUser() }
+    )
     private var isDismissing = false
     private var lastRenderedQuery: String?
     private var hasEditedLookupDraft = false
@@ -1332,6 +1418,8 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
 
     var currentDraft: String {
         let visibleDraft = (lookupField.currentEditor() as? NSTextView)?.string ?? lookupField.stringValue
+        if let translationSourceDraft,
+           visibleDraft == Self.lookupDisplayText(translationSourceDraft) { return translationSourceDraft }
         // The field is one line, while selections can contain whole paragraphs.
         // Keep their original source until the user actually edits the draft.
         if !hasEditedLookupDraft, lastRenderedQuery == state.query,
@@ -1339,6 +1427,76 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
             return state.query
         }
         return visibleDraft
+    }
+
+    /// Explicit lookup operations replace unfinished typing even when they
+    /// restore the same query. Routine asynchronous updates retain the draft.
+    func prepareForNewLookup() {
+        sourceEditTask?.cancel()
+        sourceEditTask = nil
+        translationSourceDraft = nil
+        isSearchHovered = false
+        if isLookupEditing { panel.makeFirstResponder(nil) }
+        cancelSearchAnimation()
+        lastRenderedQuery = nil
+        hasEditedLookupDraft = false
+    }
+
+    private var isLookupEditing: Bool {
+        panel.firstResponder === lookupField
+            || (lookupField.currentEditor().map { panel.firstResponder === $0 } ?? false)
+    }
+
+    private var isSearchCollapsed: Bool {
+        !state.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !isSearchHovered && !isLookupEditing
+            && (state.presentationMode == .translate || state.mode != .manual)
+    }
+
+    func setSearchHovered(_ hovered: Bool, animated: Bool = false) {
+        guard isSearchHovered != hovered else { return }
+        isSearchHovered = hovered
+        transitionSearchPresentation(animated: animated)
+    }
+
+    private func transitionSearchPresentation(animated: Bool) {
+        let target: CGFloat = isSearchCollapsed ? 0 : 1
+        cancelSearchAnimation()
+        let start = searchExpansion
+        guard animated, panel.isVisible,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              abs(target - start) > 0.001 else {
+            searchExpansion = target
+            layoutFramesForPanelSize()
+            return
+        }
+        searchAnimationTarget = target
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let duration = ShortcutUIStyle.controlTransitionDuration * Double(abs(target - start))
+        // Move the existing viewport and fade its controls. Rebuilding the
+        // body during hover would discard the source editor's cursor/undo.
+        searchAnimationTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+                let fraction = min(1, elapsed / duration)
+                let eased = CGFloat(fraction * fraction * (3 - 2 * fraction))
+                self.searchExpansion = start + (target - start) * eased
+                self.layoutFramesForPanelSize()
+                if fraction >= 1 {
+                    self.searchAnimationTarget = nil
+                    self.searchAnimationTask = nil
+                    return
+                }
+                do { try await Task.sleep(nanoseconds: 16_666_667) } catch { return }
+            }
+        }
+    }
+
+    private func cancelSearchAnimation() {
+        searchAnimationTask?.cancel()
+        searchAnimationTask = nil
+        searchAnimationTarget = nil
     }
 
     public override convenience init() {
@@ -1392,7 +1550,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
         historyButton = DictionaryHoverButton(frame: .zero)
         targetPopup = NSPopUpButton(frame: .zero, pullsDown: false)
         closeButton = DictionaryHoverButton(frame: .zero)
-        searchSurface = NSView(frame: .zero)
+        searchSurface = DictionarySearchSurface(frame: .zero)
         lookupField = NSTextField(frame: .zero)
         lookupButton = DictionaryHoverButton(frame: .zero)
         clearButton = DictionaryHoverButton(frame: .zero)
@@ -1410,6 +1568,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
         panel.appearance = NSAppearance(named: .darkAqua)
         panel.animationBehavior = .none
         panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.setAccessibilityLabel("Dictionary")
@@ -1441,6 +1600,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
         onHistoryClear: @escaping () -> Void = {}
     ) {
         beginPlacementOperation()
+        cancelSearchAnimation()
         self.state = state
         historyItems = history
         self.historyError = historyError
@@ -1480,7 +1640,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
             }
         }
         bringForward()
-        if state.mode == .manual || state.query.isEmpty {
+        if (state.presentationMode == .dictionary && state.mode == .manual) || state.query.isEmpty {
             panel.makeFirstResponder(lookupField)
         }
         updateSurfaceFocus()
@@ -1563,12 +1723,16 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
             panel.orderFrontRegardless()
             NSApp.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(nil)
+            clickAwayDismissal.start()
         case .offscreenTest:
             panel.orderFront(nil)
         }
     }
 
     public func releaseResources() {
+        cancelSearchAnimation()
+        sourceEditTask?.cancel()
+        clickAwayDismissal.stop()
         historyPopover?.close()
         historyPopover = nil
         historyPopoverController = nil
@@ -1599,7 +1763,13 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
         let modeModifiers: NSEvent.ModifierFlags = [.shift, .option, .control, .command]
         if event.keyCode == 48, flags.intersection(modeModifiers).isEmpty {
             if (lookupField.currentEditor() as? NSTextView)?.hasMarkedText() == true { return false }
+            if translationSourceEditor.hasMarkedText() { return false }
             if !event.isARepeat { toggleModeHandler?(currentDraft) }
+            return true
+        }
+        if event.keyCode == 37, flags.contains(.command), !flags.contains(.option), !flags.contains(.control) {
+            setSearchHovered(true)
+            panel.makeFirstResponder(lookupField)
             return true
         }
         guard flags.contains(.option),
@@ -1680,18 +1850,60 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
     }
 
     public func controlTextDidBeginEditing(_ notification: Notification) {
+        transitionSearchPresentation(animated: false)
         updateSurfaceFocus()
     }
 
     public func controlTextDidEndEditing(_ notification: Notification) {
+        transitionSearchPresentation(animated: true)
         updateSurfaceFocus()
     }
 
     public func controlTextDidChange(_ notification: Notification) {
         guard !isUpdatingLookupField else { return }
         hasEditedLookupDraft = true
+        if state.presentationMode == .translate {
+            sourceEditTask?.cancel()
+            translationSourceDraft = (lookupField.currentEditor() as? NSTextView)?.string ?? lookupField.stringValue
+            translationSourceEditor.string = translationSourceDraft ?? ""
+        }
         recordHumanActivity()
         updateLookupButtonState()
+    }
+
+    public func textDidChange(_ notification: Notification) {
+        guard notification.object as? NSTextView === translationSourceEditor else { return }
+        translationSourceDraft = translationSourceEditor.string
+        isUpdatingLookupField = true
+        lookupField.stringValue = Self.lookupDisplayText(translationSourceEditor.string)
+        isUpdatingLookupField = false
+        hasEditedLookupDraft = true
+        recordHumanActivity()
+        updateLookupButtonState()
+        sourceEditTask?.cancel()
+        guard !translationSourceEditor.hasMarkedText() else { return }
+        let draft = translationSourceEditor.string
+        sourceEditTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 500_000_000) } catch { return }
+            guard let self, self.panel.isVisible, self.state.presentationMode == .translate,
+                  self.translationSourceEditor.string == draft,
+                  !self.translationSourceEditor.hasMarkedText() else { return }
+            self.submitLookup()
+        }
+    }
+
+    public func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard textView === translationSourceEditor else { return false }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)),
+           !NSEvent.modifierFlags.contains(.shift) {
+            submitLookup()
+            return true
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            dismissFromUser()
+            return true
+        }
+        return false
     }
 
     // MARK: Static controls
@@ -1778,6 +1990,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
 
         targetPopup.cell = DictionaryLanguagePopupCell(textCell: "", pullsDown: false)
         targetPopup.isBordered = false
+        targetPopup.menu?.autoenablesItems = false
         targetPopup.font = sourcePopup.font
         targetPopup.appearance = sourcePopup.appearance
         for target in DictionaryTargetLanguage.allCases {
@@ -1823,6 +2036,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
     }
 
     private func configureSearch() {
+        searchSurface.onHover = { [weak self] hovered in self?.setSearchHovered(hovered, animated: true) }
         searchSurface.frame = NSRect(
             x: DictionaryPanelLayout.searchInset,
             y: DictionaryPanelLayout.searchY,
@@ -1834,6 +2048,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
             cornerRadius: ShortcutUIStyle.inputCornerRadius
         )
         searchSurface.layer?.borderColor = DictionaryPanelStyle.focusBorderColor.cgColor
+        searchSurface.layer?.masksToBounds = true
         searchSurface.setAccessibilityIdentifier("dictionary.lookup.surface")
 
         lookupField.cell = DictionaryCenteredTextFieldCell(textCell: "")
@@ -1968,6 +2183,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
         // itself changed; preserve an in-progress draft for same-query
         // updates.
         if lastRenderedQuery == nil || lastRenderedQuery != state.query {
+            translationSourceDraft = nil
             isUpdatingLookupField = true
             lookupField.stringValue = Self.lookupDisplayText(state.query)
             lastRenderedQuery = state.query
@@ -1989,6 +2205,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
         lookupButton.setAccessibilityLabel(translating ? "Translate" : "Look up")
         lookupButton.toolTip = translating ? "Translate · Return" : "Look up · Return"
         lookupField.setAccessibilityHelp("Enter text. Press Return to \(translating ? "translate" : "look it up"), Tab to switch mode, or Escape to close.")
+        lookupField.toolTip = "Return to \(translating ? "translate" : "look up") · Escape to close"
         if !sourcePopup.itemArray.contains(where: { ($0.representedObject as? String) == state.sourceLanguage.rawValue }) {
             sourcePopup.addItem(withTitle: state.sourceLanguage.displayName)
             sourcePopup.lastItem?.representedObject = state.sourceLanguage.rawValue
@@ -1999,19 +2216,48 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
             sourcePopup.selectItem(at: index)
         }
         targetPopup.selectItem(withTitle: state.targetLanguage.displayName)
-        updateDetectedSourceHelp()
+        updateLanguageChoices()
         layoutFramesForPanelSize()
         updateSurfaceFocus()
         renderBody()
     }
 
-    private func updateDetectedSourceHelp() {
-        let detected = state.detectedSourceLanguage ?? DictionaryLanguageService.detect(state.query, preferred: .automatic)
+    private var resolvedSourceLanguage: DictionarySourceLanguage {
+        if !state.sourceLanguage.isAutomatic { return state.sourceLanguage }
+        guard !state.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .automatic }
+        if let detected = state.detectedSourceLanguage, !detected.isAutomatic { return detected }
+        return DictionaryLanguageService.detect(state.query, preferred: .automatic)
+    }
+
+    private func updateLanguageChoices() {
+        let detected = resolvedSourceLanguage
         let detail = state.sourceLanguage.isAutomatic && !detected.isAutomatic
             ? "Auto · detected \(detected.displayName)" : state.sourceLanguage.displayName
+        let automaticItem = sourcePopup.itemArray.first {
+            ($0.representedObject as? String) == DictionarySourceLanguage.automatic.rawValue
+        }
+        automaticItem?.title = state.sourceLanguage.isAutomatic && !detected.isAutomatic
+            ? "Auto · \(detected.displayName)" : "Auto"
+        let compact: String
+        switch detected.rawValue.lowercased() {
+        case "zh", "zh-hans": compact = "简"
+        case "zh-hant": compact = "繁"
+        default: compact = detected.canonicalCode.uppercased()
+        }
+        (sourcePopup.cell as? DictionaryLanguagePopupCell)?.compactTitle =
+            state.sourceLanguage.isAutomatic && !detected.isAutomatic ? "Auto · \(compact)" : nil
+        sourcePopup.needsDisplay = true
         sourcePopup.toolTip = "\(detail). Choose a source language to correct detection."
         sourcePopup.setAccessibilityHelp(sourcePopup.toolTip)
         sourcePopup.setAccessibilityValue(detail)
+        for item in targetPopup.itemArray {
+            guard let target = item.representedObject as? String else { continue }
+            item.isEnabled = state.presentationMode != .translate
+                || !DictionaryTranslationLanguagePolicy.isSameLanguage(detected.rawValue, target)
+        }
+        targetPopup.setAccessibilityHelp(state.presentationMode == .translate
+            ? "Choose a different language. Simplified and Traditional Chinese can be converted between scripts."
+            : "Choose the language for definitions and examples.")
     }
 
     private func updateSurfaceFocus() {
@@ -2025,7 +2271,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
     private func updateLookupButtonState() {
         let hasQuery = !currentDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         lookupButton.isEnabled = hasQuery
-        lookupButton.alphaValue = hasQuery ? 1 : 0.56
+        lookupButton.alphaValue = (hasQuery ? 1 : 0.56) * searchExpansion
     }
 
     /// The clip view already excludes a legacy scroller. Overlay scrollers
@@ -2040,6 +2286,8 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
     }
 
     private func renderBody(preserveDocumentHeight: Bool = true) {
+        let sourceWasFocused = panel.firstResponder === translationSourceEditor
+        let sourceSelection = translationSourceEditor.selectedRange()
         if lastSizedQuery == state.query, let automaticSize = lastAutomaticPanelSize,
            panel.frame.size != automaticSize {
             isUserSizedForQuery = true
@@ -2076,6 +2324,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
             progressIndicator.frame = lookupButton.frame.insetBy(dx: 7, dy: 7)
             searchSurface.addSubview(progressIndicator)
             progressIndicator.startAnimation(nil)
+            progressIndicator.isHidden = isSearchCollapsed
         } else {
             progressIndicator.stopAnimation(nil)
             progressIndicator.removeFromSuperview()
@@ -2132,6 +2381,13 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
         scrollView.reflectScrolledClipView(scrollView.contentView)
         if preserveDocumentHeight {
             settlePanelHeightIfNeeded(contentHeight: essentialContentHeight ?? y, scrollOrigin: preservedScrollOrigin)
+        }
+        if sourceWasFocused, state.presentationMode == .translate {
+            panel.makeFirstResponder(translationSourceEditor)
+            let length = (translationSourceEditor.string as NSString).length
+            let location = min(sourceSelection.location, length)
+            translationSourceEditor.setSelectedRange(NSRange(location: location,
+                length: min(sourceSelection.length, length - location)))
         }
     }
 
@@ -2208,7 +2464,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
         let sideBySide = width >= 500
         let gap: CGFloat = 12
         let paneWidth = sideBySide ? (width - gap) / 2 : width
-        let sourceText = hasSource ? state.query : "Enter text above, then press Return to translate."
+        let sourceText = translationSourceDraft ?? (hasSource ? state.query : "")
         let resultText = state.paragraphTranslation
             ?? (hasSource ? "Translation will appear here." : "Ready to translate.")
         let sourceHeight = translationPaneHeight(sourceText, width: paneWidth)
@@ -2254,6 +2510,34 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
             marker.alignment = .right
             marker.frame = NSRect(x: frame.width - (canSpeak ? 76 : 43), y: 14, width: 27, height: 17)
             pane.addSubview(marker)
+        }
+        if title == "SOURCE" {
+            let sourceScroll = NSScrollView(frame: NSRect(x: 14, y: 44, width: frame.width - 28, height: frame.height - 58))
+            sourceScroll.drawsBackground = false
+            sourceScroll.hasVerticalScroller = true
+            sourceScroll.autohidesScrollers = true
+            translationSourceEditor.delegate = self
+            translationSourceEditor.isEditable = true
+            translationSourceEditor.isRichText = false
+            translationSourceEditor.drawsBackground = false
+            translationSourceEditor.font = .systemFont(ofSize: 16)
+            translationSourceEditor.textColor = ShortcutUIStyle.primaryTextColor
+            translationSourceEditor.insertionPointColor = ShortcutUIStyle.accentColor
+            translationSourceEditor.textContainerInset = NSSize(width: 0, height: 0)
+            translationSourceEditor.textContainer?.lineFragmentPadding = 0
+            translationSourceEditor.textContainer?.widthTracksTextView = true
+            translationSourceEditor.isVerticallyResizable = true
+            translationSourceEditor.isHorizontallyResizable = false
+            translationSourceEditor.autoresizingMask = [.width]
+            if translationSourceEditor.string != text { translationSourceEditor.string = text }
+            translationSourceEditor.frame.size = sourceScroll.contentSize
+            translationSourceEditor.setAccessibilityLabel("Full source text")
+            translationSourceEditor.setAccessibilityIdentifier(identifier)
+            translationSourceEditor.setAccessibilityHelp("Edit to translate after a short pause. Return translates; Shift-Return adds a line.")
+            sourceScroll.documentView = translationSourceEditor
+            pane.addSubview(sourceScroll)
+            bodyDocument.addSubview(pane)
+            return
         }
         let content = NSTextField(wrappingLabelWithString: text)
         content.isSelectable = !placeholder
@@ -2319,7 +2603,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
         )
         settings.frame = NSRect(x: width / 2 - 105, y: cursor, width: 210, height: 22)
         settings.setAccessibilityLabel("Open capture permissions and settings")
-        settings.setAccessibilityHelp("Open macOS settings for Screen Recording and Accessibility permissions.")
+        settings.setAccessibilityHelp("Open macOS Accessibility settings for selected-text capture.")
         settings.toolTip = "Open capture permissions & settings"
         bodyDocument.addSubview(settings)
         return cursor + 28
@@ -2328,7 +2612,6 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
     private var shouldShowPermissionSettings: Bool {
         guard let message = state.errorMessage?.lowercased() else { return false }
         return message.contains("permission")
-            || message.contains("screen recording")
             || message.contains("accessibility")
     }
 
@@ -2343,6 +2626,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
             tokens: preserved.tokens,
             activeIndex: preserved.activeIndex,
             source: sentence.source,
+            selectedRange: sentence.activeRange,
             onSelect: { [weak self] token in
                 self?.beginPlacementOperation()
                 self?.selectTokenHandler?(token)
@@ -3017,15 +3301,6 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
             if captureMessage.contains("accessibility") {
                 return "Enable Accessibility or type to look up."
             }
-            if captureMessage.contains("capture failed") {
-                return "Screenshot capture failed. Type to look up."
-            }
-            if captureMessage.contains("screen recording") {
-                return "Enable Screen Recording or type to look up."
-            }
-            if captureMessage.contains("no readable text") {
-                return "No readable text found. Type to look up."
-            }
             if captureMessage.contains("no text captured") {
                 return "No text captured. Type to look up."
             }
@@ -3091,8 +3366,11 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
 
     private func dismissFromUser() {
         guard !isDismissing else { return }
+        cancelSearchAnimation()
         recordHumanActivity()
         isDismissing = true
+        sourceEditTask?.cancel()
+        clickAwayDismissal.stop()
         historyPopover?.close()
         historyPopover = nil
         historyPopoverController = nil
@@ -3215,20 +3493,23 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
             || lastSizedPresentationMode != state.presentationMode
         guard isNewQuery else { return }
         isUserSizedForQuery = false
-        let compact = state.mode == .manual
+        let compact = state.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && state.word == nil
             && state.sentence == nil
             && !state.isLoading
         let isInitialLoading = state.isLoading
             && state.word == nil
             && state.errorMessage == nil
-        let preferredHeight = compact
+        let substantialText = state.query.count >= 160 || state.query.filter({ $0 == "\n" }).count >= 4
+        let preferredWidth: CGFloat = substantialText ? (state.query.count >= 1_000 ? 920 : 800) : panel.frame.width
+        let preferredHeight = substantialText ? CGFloat(640) : compact
             ? DictionaryPanelLayout.compactPanelHeight
             : DictionaryPanelLayout.minimumPanelHeight
         let visibleFrame = visibleFrameForCurrentPanel()
         let usable = visibleFrame?.insetBy(dx: 16, dy: 16)
         let targetHeight = min(preferredHeight, usable?.height ?? preferredHeight)
-        guard abs(panel.frame.height - targetHeight) > 1 else {
+        let targetWidth = min(preferredWidth, usable?.width ?? preferredWidth)
+        guard abs(panel.frame.height - targetHeight) > 1 || abs(panel.frame.width - targetWidth) > 1 else {
             lastSizedQuery = state.query
             lastSizedPresentationMode = state.presentationMode
             lastAutomaticPanelSize = panel.frame.size
@@ -3239,7 +3520,7 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
         let previousFrame = panel.frame
         isResizingPanel = true
         withProgrammaticFrameChange {
-            panel.setContentSize(NSSize(width: panel.frame.width, height: targetHeight))
+            panel.setContentSize(NSSize(width: targetWidth, height: targetHeight))
             let resizedFrame = panel.frame
             let resolved = frameForAutomaticResize(
                 from: previousFrame,
@@ -3264,6 +3545,11 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
     }
 
     private func layoutFramesForPanelSize() {
+        let target: CGFloat = isSearchCollapsed ? 0 : 1
+        if searchAnimationTarget != target {
+            cancelSearchAnimation()
+            searchExpansion = target
+        }
         let bounds = panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 620, height: 620)
         background.frame = bounds
         let narrow = bounds.width < 480
@@ -3272,8 +3558,22 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
             x: DictionaryPanelLayout.searchInset,
             y: DictionaryPanelLayout.searchY + verticalOffset,
             width: max(260, bounds.width - DictionaryPanelLayout.searchInset * 2),
-            height: DictionaryPanelLayout.searchHeight
+            height: 24 + (DictionaryPanelLayout.searchHeight - 24) * searchExpansion
         )
+        let fullyCollapsed = searchExpansion <= 0.001
+        lookupField.isHidden = fullyCollapsed
+        lookupButton.isHidden = fullyCollapsed || state.isLoading
+        clearButton.isHidden = fullyCollapsed
+        lookupField.alphaValue = searchExpansion
+        clearButton.alphaValue = searchExpansion
+        progressIndicator.alphaValue = searchExpansion
+        progressIndicator.isHidden = fullyCollapsed
+        updateLookupButtonState()
+        searchSurface.layer?.backgroundColor = ShortcutUIStyle.raisedSurfaceColor.withAlphaComponent(searchExpansion).cgColor
+        searchSurface.layer?.borderWidth = searchExpansion
+        searchSurface.layer?.cornerRadius = ShortcutUIStyle.inputCornerRadius
+        searchSurface.lineOpacity = 1 - searchExpansion
+        searchSurface.needsDisplay = true
         clearButton.frame = NSRect(
             x: searchSurface.bounds.width
                 - DictionaryPanelLayout.lookupTrailingInset
@@ -3296,11 +3596,12 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
                 - DictionaryPanelLayout.controlGap
                 - lookupField.frame.minX
         )
+        let bodyY = DictionaryPanelLayout.scrollY + verticalOffset - 28 * (1 - searchExpansion)
         scrollView.frame = NSRect(
             x: DictionaryPanelLayout.outerInset,
-            y: DictionaryPanelLayout.scrollY + verticalOffset,
+            y: bodyY,
             width: max(260, bounds.width - DictionaryPanelLayout.outerInset * 2),
-            height: max(80, bounds.height - DictionaryPanelLayout.scrollY - verticalOffset - DictionaryPanelLayout.outerInset)
+            height: max(80, bounds.height - bodyY - DictionaryPanelLayout.outerInset)
         )
 
         let right = bounds.width - DictionaryPanelLayout.headerInset
@@ -3317,7 +3618,8 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
         modeButton.frame = NSRect(x: DictionaryPanelLayout.headerInset + 112,
                                   y: DictionaryPanelLayout.headerY, width: 32, height: 32)
         if state.isLoading { progressIndicator.frame = lookupButton.frame.insetBy(dx: 7, dy: 7) }
-        bodyDocument.setFrameSize(NSSize(width: scrollView.contentView.bounds.width, height: bodyDocument.frame.height))
+        bodyDocument.setFrameSize(NSSize(width: scrollView.contentView.bounds.width,
+                                         height: max(bodyDocument.frame.height, scrollView.contentView.bounds.height)))
     }
 
     private func makeLabel(
@@ -3470,6 +3772,12 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
     @objc private func targetChanged(_ sender: NSPopUpButton) {
         guard let raw = sender.selectedItem?.representedObject as? String,
               let target = DictionaryTargetLanguage(rawValue: raw) else { return }
+        guard state.presentationMode != .translate
+                || !DictionaryTranslationLanguagePolicy.isSameLanguage(resolvedSourceLanguage.rawValue, raw)
+        else {
+            updateInterface()
+            return
+        }
         beginPlacementOperation()
         state = DictionaryPanelViewState(query: state.query, sourceLanguage: state.sourceLanguage,
             detectedSourceLanguage: state.detectedSourceLanguage, targetLanguage: target, mode: state.mode,

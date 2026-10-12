@@ -6,6 +6,9 @@ final class InputLockPanelController: NSObject, NSWindowDelegate {
     private var cards: [NSView] = []
     private var selectedIndex = 0
     private var selectionHandler: ((InputLockMode) -> Void)?
+    private lazy var clickAwayDismissal = TransientPanelDismissal(window: panel) { [weak self] in
+        self?.dismiss()
+    }
 
     var isVisible: Bool { panel.isVisible }
 
@@ -77,9 +80,11 @@ final class InputLockPanelController: NSObject, NSWindowDelegate {
         ))
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        clickAwayDismissal.start()
     }
 
     func dismiss() {
+        clickAwayDismissal.stop()
         panel.orderOut(nil)
     }
 
@@ -95,7 +100,7 @@ final class InputLockPanelController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        dismiss()
+        clickAwayDismissal.handleResignKey()
     }
 
     private func addChoice(

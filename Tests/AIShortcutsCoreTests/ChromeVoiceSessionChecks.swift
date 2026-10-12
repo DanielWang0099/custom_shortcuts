@@ -1,4 +1,5 @@
 import AIShortcutsCore
+import CoreGraphics
 import Foundation
 
 private struct ChromeVoiceCheckFailure: Error, CustomStringConvertible {
@@ -15,6 +16,48 @@ private func expectChromeVoice(
 }
 
 func chromeVoiceSessionChecks() async throws {
+    let visibleBounds = CGRect(x: -1_440, y: 25, width: 1_440, height: 900)
+    try expectChromeVoice(
+        ChromeVoiceTargetPolicy.matchesFocusedWindow(
+            tabIsSelected: true, windowIsMinimized: false,
+            scriptingBounds: visibleBounds, focusedBounds: visibleBounds
+        ),
+        "A focused, selected ChatGPT window must be accepted regardless of Chrome's scripting window order."
+    )
+    try expectChromeVoice(
+        ChromeVoiceTargetPolicy.matchesFocusedWindow(
+            tabIsSelected: true, windowIsMinimized: false,
+            scriptingBounds: visibleBounds,
+            focusedBounds: visibleBounds.offsetBy(dx: 1, dy: -1)
+        ),
+        "Small AX rounding differences must not reject the visible window."
+    )
+    let wrongWindows: [(Bool, Bool, CGRect)] = [
+        (false, false, visibleBounds),
+        (true, true, visibleBounds),
+        (true, false, visibleBounds.offsetBy(dx: 200, dy: 0)),
+        (true, false, .zero),
+    ]
+    for (selected, minimized, focusedBounds) in wrongWindows {
+        try expectChromeVoice(
+            !ChromeVoiceTargetPolicy.matchesFocusedWindow(
+                tabIsSelected: selected, windowIsMinimized: minimized,
+                scriptingBounds: visibleBounds, focusedBounds: focusedBounds
+            ),
+            "An unselected, minimized, or different window must never supply the voice button."
+        )
+    }
+    let budget = ChromeVoiceLaunchBudget(now: 100)
+    try expectChromeVoice(
+        budget.remaining(now: 100) == 8 && budget.remaining(now: 109) == 0,
+        "Voice startup must have a single eight-second monotonic budget."
+    )
+    try expectChromeVoice(
+        budget.stageDeadline(duration: 3, now: 100) == 103
+            && budget.stageDeadline(duration: 4, now: 106) == 108
+            && budget.stageDeadline(duration: 3, now: 107) == 108,
+        "Reload and voice-start waits must use only the remaining startup budget."
+    )
     let start = Date(timeIntervalSince1970: 1_800_000_000)
     let tab = ChromeVoiceTabReference(processIdentifier: 100, tabIdentifier: 42)
 

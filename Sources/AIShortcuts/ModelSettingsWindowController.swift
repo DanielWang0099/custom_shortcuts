@@ -35,6 +35,9 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
     private var drafts: [AIProvider: Draft] = [:]
     private var selectedProvider: AIProvider = .openAICompatible
     private var onSave: ((AIProviderConfiguration, String?) -> Void)?
+    private lazy var clickAwayDismissal = TransientPanelDismissal(window: panel) { [weak self] in
+        self?.dismiss()
+    }
 
     var isVisible: Bool { panel.isVisible }
 
@@ -77,9 +80,11 @@ final class ModelSettingsWindowController: NSObject, NSWindowDelegate, NSTextFie
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(endpointField)
+        clickAwayDismissal.start()
     }
 
     func dismiss() {
+        clickAwayDismissal.stop()
         panel.orderOut(nil)
         onSave = nil
     }

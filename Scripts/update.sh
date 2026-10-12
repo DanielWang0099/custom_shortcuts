@@ -116,6 +116,9 @@ fi
 # Run all checks and the release build while the installed app is still
 # untouched. A failed build never stops the running application.
 swift run AIShortcutsCoreChecks
+./Scripts/check_voice.sh
+./Scripts/check_dictionary.sh
+./Scripts/check_panels.sh
 swift run AIShortcutsRenderingChecks
 swift build -c release --product AIShortcuts
 BIN_PATH=$(swift build -c release --show-bin-path)

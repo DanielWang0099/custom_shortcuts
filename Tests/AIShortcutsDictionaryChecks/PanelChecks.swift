@@ -1,4 +1,5 @@
 import AppKit
+import AIShortcutsCore
 import Foundation
 
 private struct DictionaryPanelCheckFailure: Error, CustomStringConvertible {
@@ -121,27 +122,28 @@ private func samePanelSentenceGeometry(
 
 @MainActor
 func dictionaryPanelTranslationChecks() throws {
+    try dictionaryPanelTranslationLanguageChecks()
     let source = "A long captured first line that must remain readable in full.\nThe second line still matters after a mode change."
     var toggledDrafts: [String] = []
     let panel = DictionaryPanelController(presentationMode: .offscreenTest)
     defer { panel.releaseResources() }
     panel.show(state: .init(query: source, sourceLanguage: .english,
                             targetLanguage: .japanese, presentationMode: .translate,
-                            paragraphTranslation: "最初の行。次の行も大切です。"),
+                            paragraphTranslation: "最初の行。\n\n次の行も大切です。"),
                onSubmit: { _ in }, onToggleMode: { toggledDrafts.append($0) })
     let window = try dictionaryFixtureWindow()
     guard let content = window.contentView,
           let field = panelControl(content, identifier: "dictionary.lookup") as? NSTextField,
-          let sourceView = panelControl(content, identifier: "dictionary.translate.source") as? NSTextField,
+          let sourceView = panelControl(content, identifier: "dictionary.translate.source") as? NSTextView,
           let resultView = panelControl(content, identifier: "dictionary.translate.result") as? NSTextField,
           let modeButton = panelControl(content, identifier: "dictionary.mode.toggle") as? NSButton
     else { throw DictionaryPanelCheckFailure(description: "Translate controls are missing") }
-    try requirePanel(panel.currentDraft == source && sourceView.stringValue == source,
+    try requirePanel(panel.currentDraft == source && sourceView.string == source,
                      "Translate pane or search draft changed the full captured source")
     try requirePanel(!field.stringValue.contains("\n"),
                      "Multiline capture painted extra clipped lines in the one-line search field")
-    try requirePanel(resultView.isSelectable && resultView.stringValue == "最初の行。次の行も大切です。",
-                     "Translated paragraph is not selectable")
+    try requirePanel(resultView.isSelectable && resultView.stringValue == "最初の行。\n\n次の行も大切です。",
+                     "Translated paragraph breaks were lost or the result is not selectable")
     try requirePanel(modeButton.accessibilityLabel() == "Switch to Dictionary",
                      "The mode control does not announce its outcome")
     try savePanelPreview(window, name: "translate-normal", subdirectory: "translation")
@@ -183,7 +185,7 @@ func dictionaryPanelTranslationChecks() throws {
     window.setContentSize(NSSize(width: 380, height: 320))
     panel.show(state: .init(query: source, sourceLanguage: .english,
                               targetLanguage: .japanese, presentationMode: .translate,
-                              paragraphTranslation: "最初の行。次の行も大切です。"),
+                              paragraphTranslation: "最初の行。\n\n次の行も大切です。"),
                onSubmit: { _ in }, onToggleMode: { toggledDrafts.append($0) })
     content.layoutSubtreeIfNeeded()
     let narrowSource = panelControl(content, identifier: "dictionary.translate.source")!
@@ -226,8 +228,8 @@ func dictionaryPanelTranslationChecks() throws {
     let loadingHeight = window.frame.height
     panel.update(state: .init(query: longSource, presentationMode: .translate,
                               paragraphTranslation: longSource))
-    try requirePanel(window.frame.height > loadingHeight,
-                     "A completed long translation did not grow from the initial loading viewport")
+    try requirePanel(window.frame.height >= loadingHeight && window.frame.width >= 800,
+                     "A substantial translation did not receive a larger initial viewport")
     if let result = panelControl(content, identifier: "dictionary.translate.result"),
        let pane = result.superview {
         try requirePanel(pane.frame.maxY <= bodyScroll.contentView.bounds.height + 0.5,
@@ -245,6 +247,72 @@ func dictionaryPanelTranslationChecks() throws {
     try requirePanel(window.firstResponder === field || window.firstResponder === field.currentEditor(),
                      "Switching an empty panel to Translate did not focus its input")
     print("PASS Translate pane layout, full draft, selectable output, Tab boundaries, and return")
+}
+
+@MainActor
+private func dictionaryPanelTranslationLanguageChecks() throws {
+    let panel = DictionaryPanelController(presentationMode: .offscreenTest)
+    var selectedTargets: [DictionaryTargetLanguage] = []
+    panel.show(
+        state: .init(query: "Hello there", detectedSourceLanguage: .english,
+                     targetLanguage: .chinese, presentationMode: .translate,
+                     paragraphTranslation: "你好。"),
+        onSubmit: { _ in },
+        onTargetChange: { selectedTargets.append($0) }
+    )
+    defer { panel.releaseResources() }
+    let window = try dictionaryFixtureWindow()
+    guard let content = window.contentView,
+          let source = panelControl(content, identifier: "dictionary.source") as? NSPopUpButton,
+          let target = panelControl(content, identifier: "dictionary.target") as? NSPopUpButton
+    else { throw DictionaryPanelCheckFailure(description: "Translation language selectors are missing") }
+    func item(_ popup: NSPopUpButton, _ raw: String) throws -> NSMenuItem {
+        guard let result = popup.itemArray.first(where: { ($0.representedObject as? String) == raw }) else {
+            throw DictionaryPanelCheckFailure(description: "Language \(raw) is missing from the selector")
+        }
+        return result
+    }
+    let english = try item(target, "en")
+    let spanish = try item(target, "es")
+    let simplified = try item(target, "zh")
+    let traditional = try item(target, "zh-hant")
+    try requirePanel(source.selectedItem?.title == "Auto · English"
+                     && source.accessibilityValue() as? String == "Auto · detected English",
+                     "Automatic source detection is hidden in the language selector")
+    try requirePanel(english.isEnabled == false
+                     && target.menu?.autoenablesItems == false,
+                     "Translate allows the detected source language as its target")
+    target.select(english)
+    try sendPanelAction(target, named: "dictionary.target")
+    try requirePanel(selectedTargets.isEmpty && target.selectedItem?.representedObject as? String == "zh",
+                     "A same-language target action escaped the translation guard")
+    target.select(spanish)
+    try sendPanelAction(target, named: "dictionary.target")
+    try requirePanel(selectedTargets == [.spanish], "A useful translation target was blocked")
+    try savePanelPreview(window, name: "translate-auto-english", subdirectory: "translation")
+
+    panel.update(state: .init(query: "筛选资料", detectedSourceLanguage: .chinese,
+                              targetLanguage: .english, presentationMode: .translate))
+    try requirePanel(simplified.isEnabled == false && traditional.isEnabled,
+                     "Simplified source target rules blocked script conversion or allowed identical scripts")
+    try requirePanel(source.selectedItem?.title == "Auto · 简体中文",
+                     "Simplified Chinese detection was not visible")
+    panel.update(state: .init(query: "篩選資料", detectedSourceLanguage: .traditionalChinese,
+                              targetLanguage: .chinese, presentationMode: .translate))
+    try requirePanel(simplified.isEnabled && traditional.isEnabled == false,
+                     "Traditional source target rules blocked Simplified conversion or allowed identical scripts")
+    try requirePanel(source.selectedItem?.title == "Auto · 繁體中文",
+                     "Traditional Chinese detection was not visible")
+
+    panel.update(state: .init(query: "Hello", sourceLanguage: .english,
+                              targetLanguage: .english, mode: .word,
+                              word: .init(originalText: "Hello", headword: "hello")))
+    try requirePanel(english.isEnabled && source.title == "English",
+                     "Dictionary definitions incorrectly inherited Translate target restrictions")
+    panel.update(state: .init(query: "", presentationMode: .translate))
+    try requirePanel(source.title == "Auto" && target.itemArray.allSatisfy(\.isEnabled),
+                     "An empty Translate draft claimed a detected language or disabled a target")
+    print("PASS visible automatic language detection and same-language Translate protection")
 }
 
 @MainActor
@@ -270,6 +338,107 @@ private func savePanelPreview(
         throw DictionaryPanelCheckFailure(description: "Cannot render \(subdirectory) preview \(name)")
     }
     try png.write(to: directory.appendingPathComponent("\(name).png"))
+}
+
+@MainActor
+func dictionaryPanelEditingChecks() async throws {
+    let source = "A complete source paragraph.\nA second line is preserved."
+    let panel = DictionaryPanelController(presentationMode: .offscreenTest)
+    defer { panel.releaseResources() }
+    var submissions: [String] = []
+    panel.show(state: .init(query: source, sourceLanguage: .english, targetLanguage: .spanish,
+                            presentationMode: .translate, paragraphTranslation: "Un párrafo completo."),
+               onSubmit: { submissions.append($0) })
+    let window = try dictionaryFixtureWindow()
+    let content = window.contentView!
+    let field = panelControl(content, identifier: "dictionary.lookup") as! NSTextField
+    let surface = panelControl(content, identifier: "dictionary.lookup.surface")!
+    let editor = panelControl(content, identifier: "dictionary.translate.source") as! NSTextView
+    try requirePanel(editor.isEditable && field.isHidden && surface.frame.height == 24,
+                     "An active translation did not collapse the duplicate lookup into a line")
+    panel.setSearchHovered(true)
+    try requirePanel(!field.isHidden && surface.frame.height == 52, "Hover did not reveal lookup")
+    panel.setSearchHovered(false)
+    window.makeFirstResponder(editor)
+    let sourcePane = editor.superview?.superview?.superview
+    let caretBeforeHover = editor.selectedRange()
+    panel.setSearchHovered(true, animated: true)
+    try await Task.sleep(nanoseconds: 55_000_000)
+    if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        try requirePanel(surface.frame.height > 24 && surface.frame.height < 52,
+                         "Search expansion jumped directly to its final size")
+    }
+    try requirePanel(editor.superview?.superview?.superview === sourcePane
+                     && editor.selectedRange() == caretBeforeHover,
+                     "Search animation rebuilt the source pane or disturbed the caret")
+    try savePanelPreview(window, name: "search-expanding", subdirectory: "translation")
+    panel.setSearchHovered(false, animated: true)
+    try await Task.sleep(nanoseconds: 220_000_000)
+    try requirePanel(surface.frame.height == 24 && field.isHidden,
+                     "An interrupted expansion did not collapse cleanly")
+    panel.setSearchHovered(true, animated: true)
+    try await Task.sleep(nanoseconds: 220_000_000)
+    try requirePanel(surface.frame.height == 52 && !field.isHidden,
+                     "Search expansion did not settle with editable controls")
+    panel.setSearchHovered(false)
+    let draft = "Updated source.\nKeep this entire second line."
+    editor.string = draft
+    editor.setSelectedRange(NSRange(location: 7, length: 0))
+    panel.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+    try requirePanel(panel.currentDraft == draft && field.stringValue == draft.replacingOccurrences(of: "\n", with: " "),
+                     "Editing the source did not synchronize the full multiline lookup")
+    panel.update(state: .init(query: source, sourceLanguage: .english, targetLanguage: .spanish,
+                              presentationMode: .translate, paragraphTranslation: "Late result."))
+    try requirePanel(editor.string == draft && window.firstResponder === editor && editor.selectedRange().location == 7,
+                     "An asynchronous translation update discarded source typing or its cursor")
+    try await Task.sleep(nanoseconds: 600_000_000)
+    try requirePanel(submissions == [draft], "Source editing did not submit once after a pause")
+    panel.setSearchHovered(true)
+    field.stringValue = "Edited in lookup"
+    panel.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+    try requirePanel(editor.string == "Edited in lookup" && panel.currentDraft == "Edited in lookup",
+                     "Lookup edits did not synchronize the source pane")
+    editor.string = "First edit"
+    panel.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+    editor.string = "Newest edit"
+    panel.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+    try await Task.sleep(nanoseconds: 600_000_000)
+    try requirePanel(submissions == [draft, "Newest edit"], "Rapid edits submitted stale source text")
+    editor.string = "Canceled edit"
+    panel.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+    panel.dismiss()
+    try await Task.sleep(nanoseconds: 600_000_000)
+    try requirePanel(submissions.count == 2 && !panel.isVisible, "Dismissal submitted a delayed source edit")
+
+    let phrase = "romantic experience"
+    let full = phrase + " feels special."
+    panel.setSearchHovered(false)
+    let tokens = DictionaryLanguageService.tokenize(full).map(DictionaryPanelToken.init(native:))
+    var selected: DictionaryPanelToken?
+    panel.show(state: .init(query: full, mode: .sentence,
+                            word: .init(originalText: "romantic", headword: "romantic"),
+                            sentence: .init(source: full, tokens: tokens)),
+               onSubmit: { _ in }, onSelectToken: { selected = $0 })
+    let sentence = panelDescendants(content).compactMap { $0 as? NSTextView }.first { $0.accessibilityLabel() == "Sentence source" }!
+    let words = tokens.filter { !$0.isWhitespace && !$0.isPunctuation }
+    func event(_ type: NSEvent.EventType, range: NSRange) throws -> NSEvent {
+        let layout = sentence.layoutManager!, container = sentence.textContainer!
+        let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let rect = layout.boundingRect(forGlyphRange: glyphs, in: container)
+        guard let result = NSEvent.mouseEvent(with: type,
+            location: sentence.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil), modifierFlags: [],
+            timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+        else { throw DictionaryPanelCheckFailure(description: "Cannot create phrase selection event") }
+        return result
+    }
+    sentence.mouseDown(with: try event(.leftMouseDown, range: words[0].utf16Range))
+    sentence.mouseDragged(with: try event(.leftMouseDragged, range: words[1].utf16Range))
+    try requirePanel(selected == nil, "Dragging started lookups before releasing the selection")
+    sentence.mouseUp(with: try event(.leftMouseUp, range: words[1].utf16Range))
+    try requirePanel(selected?.text == phrase && selected?.utf16Range == NSRange(location: 0, length: phrase.utf16.count),
+                     "Dragging multiple words did not produce the complete phrase and source range")
+    try savePanelPreview(window, name: "dictionary-phrase-selection", subdirectory: "translation")
+    print("PASS collapsed lookup, editable synchronized source, debounce/cancellation, and phrase drag")
 }
 
 /// Checks the compact-to-result resize path and the native field-cell geometry
@@ -1249,6 +1418,7 @@ func dictionaryPanelCompoundChecks() throws {
         throw DictionaryPanelCheckFailure(description: "Could not construct a compound token click event")
     }
     sourceView.mouseDown(with: clickEvent)
+    sourceView.mouseUp(with: clickEvent)
     try requirePanel(
         selectedTokens.last?.utf16Range == secondIdiom,
         "Clicking the repeated idiom did not preserve its UTF-16 span"

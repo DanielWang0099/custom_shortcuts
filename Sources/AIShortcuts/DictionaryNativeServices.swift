@@ -4,13 +4,12 @@ import AppKit
 import CoreServices
 import Foundation
 import NaturalLanguage
-import Vision
 
 // MARK: - Language and token services
 
 /// A token produced by the native tokenizer. Ranges are UTF-16 ranges so they
 /// can be used directly with AppKit text controls and the ranges returned by
-/// Vision. Whitespace is represented too, which lets callers rebuild the
+/// selection services. Whitespace is represented too, which lets callers rebuild the
 /// source text without losing punctuation, spacing, or line breaks.
 public struct DictionaryNativeToken: Equatable, Sendable {
     public let text: String
@@ -681,65 +680,6 @@ public enum DictionaryNativeLookupService {
             definition: definition,
             sourceName: "macOS Dictionary"
         )
-    }
-}
-
-// MARK: - Vision OCR
-
-public enum DictionaryOCRService {
-    public static func supportedRecognitionLanguages() -> [String] {
-        let request = VNRecognizeTextRequest()
-        if #available(macOS 12.0, *) {
-            return (try? request.supportedRecognitionLanguages()) ?? []
-        }
-        return []
-    }
-
-    public static func recognizeText(from imageData: Data) async throws -> String {
-        try Task.checkCancellation()
-
-        let text = try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let request = VNRecognizeTextRequest()
-                    request.revision = VNRecognizeTextRequestRevision3
-                    request.recognitionLevel = .accurate
-                    request.usesLanguageCorrection = true
-                    if #available(macOS 12.0, *) {
-                        request.automaticallyDetectsLanguage = true
-                        let supported = (try? request.supportedRecognitionLanguages()) ?? []
-                        let preferred = ["en-US", "es-ES", "zh-Hans", "zh-Hant", "ja-JP"]
-                        let selected = preferred.filter { language in
-                            supported.contains(language)
-                                || supported.contains(where: { $0.split(separator: "-").first == language.split(separator: "-").first })
-                        }
-                        if !selected.isEmpty {
-                            request.recognitionLanguages = selected
-                        }
-                    }
-
-                    let handler = VNImageRequestHandler(data: imageData, options: [:])
-                    try handler.perform([request])
-
-                    let observations = (request.results ?? []).sorted {
-                        if abs($0.boundingBox.midY - $1.boundingBox.midY) > 0.02 {
-                            return $0.boundingBox.midY > $1.boundingBox.midY
-                        }
-                        return $0.boundingBox.minX < $1.boundingBox.minX
-                    }
-                    let strings = observations.compactMap {
-                        $0.topCandidates(1).first?.string.trimmingCharacters(
-                            in: .whitespacesAndNewlines
-                        )
-                    }.filter { !$0.isEmpty }
-                    continuation.resume(returning: strings.joined(separator: "\n"))
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
-        try Task.checkCancellation()
-        return text
     }
 }
 

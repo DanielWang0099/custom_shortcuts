@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 public struct ChromeVoiceTabReference: Equatable, Sendable {
@@ -7,6 +8,46 @@ public struct ChromeVoiceTabReference: Equatable, Sendable {
     public init(processIdentifier: Int32, tabIdentifier: Int) {
         self.processIdentifier = processIdentifier
         self.tabIdentifier = tabIdentifier
+    }
+}
+
+/// Chrome's scripting `front window` can be minimized or on another Space.
+/// Correlate the tracked tab's window with the actual focused AX window instead.
+public enum ChromeVoiceTargetPolicy {
+    public static func matchesFocusedWindow(
+        tabIsSelected: Bool,
+        windowIsMinimized: Bool,
+        scriptingBounds: CGRect,
+        focusedBounds: CGRect
+    ) -> Bool {
+        guard tabIsSelected, !windowIsMinimized,
+              scriptingBounds.width > 0, scriptingBounds.height > 0,
+              focusedBounds.width > 0, focusedBounds.height > 0 else { return false }
+        return zip(
+            [scriptingBounds.minX, scriptingBounds.minY, scriptingBounds.width, scriptingBounds.height],
+            [focusedBounds.minX, focusedBounds.minY, focusedBounds.width, focusedBounds.height]
+        ).allSatisfy { $0.isFinite && $1.isFinite && abs($0 - $1) <= 2 }
+    }
+}
+
+/// All startup stages, including one optional reload, share this monotonic budget.
+public struct ChromeVoiceLaunchBudget: Sendable {
+    public static let timeout: TimeInterval = 8
+    public let deadline: TimeInterval
+
+    public init(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        deadline = now + Self.timeout
+    }
+
+    public func remaining(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> TimeInterval {
+        max(0, deadline - now)
+    }
+
+    public func stageDeadline(
+        duration: TimeInterval,
+        now: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> TimeInterval {
+        min(deadline, now + duration)
     }
 }
 

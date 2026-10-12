@@ -97,6 +97,16 @@ private func dictionaryHistoryMemoryChecks() throws {
         "Changing source or target language incorrectly deduplicated a lookup."
     )
 
+    let translate = try expectDictionaryHistoryItem(store.record(
+        query: "hola", sourceLanguage: "auto", targetLanguage: "en",
+        presentationMode: .translate, at: Date(timeIntervalSince1970: 700)
+    ), "Translate history was not recorded.")
+    try expectDictionaryHistory(
+        store.items.count == 6 && translate.presentationMode == .translate
+            && translate.id != replacement.id && store.items.first == translate,
+        "Dictionary and Translate history were incorrectly deduplicated or lost their mode."
+    )
+
     try expectDictionaryHistory(
         store.record(
             query: " \n\t ",
@@ -157,6 +167,29 @@ private func dictionaryHistoryPersistenceChecks() throws {
         reloaded.items == [item],
         "Persisted history did not round-trip its Unicode/query metadata and date."
     )
+
+    let modeURL = directory.appendingPathComponent("mode-history.json")
+    let modeStore = DictionaryHistoryStore(fileURL: modeURL)
+    _ = modeStore.record(query: "casa", sourceLanguage: "es", targetLanguage: "en", presentationMode: .translate)
+    try expectDictionaryHistory(DictionaryHistoryStore(fileURL: modeURL).items.first?.presentationMode == .translate,
+                                "Translate mode was not persisted across history restart.")
+
+    // Both the early array shape and the versioned shape predate the mode
+    // property. They must retain their query/languages as Dictionary entries.
+    let legacyItem: [String: Any] = [
+        "id": UUID().uuidString, "query": "你好", "sourceLanguage": "auto",
+        "detectedSourceLanguage": "zh", "targetLanguage": "en", "lookedUpAt": 1_000,
+    ]
+    for versioned in [false, true] {
+        let legacyURL = directory.appendingPathComponent("legacy-\(versioned).json")
+        let object: Any = versioned ? ["version": 1, "items": [legacyItem]] : [legacyItem]
+        try JSONSerialization.data(withJSONObject: object).write(to: legacyURL)
+        let legacy = DictionaryHistoryStore(fileURL: legacyURL)
+        try expectDictionaryHistory(legacy.items.first?.query == "你好"
+                                    && legacy.items.first?.presentationMode == .dictionary
+                                    && legacy.storageError == nil,
+                                    "Legacy history without a mode did not migrate to Dictionary.")
+    }
 
     let preciseFileURL = directory.appendingPathComponent("precise-dates.json")
     let preciseStore = DictionaryHistoryStore(fileURL: preciseFileURL)
