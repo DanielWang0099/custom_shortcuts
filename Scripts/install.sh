@@ -27,6 +27,7 @@ if [[ "${1:-}" == "--help" ]]; then
   print ""
   print "An optional env file supplies OPENAI_API_KEY for this install only."
   print "Without one, the app asks for your key on first launch."
+  print "For an existing installation, use ./Scripts/update.sh to update without resetting permissions."
   exit 0
 fi
 
@@ -125,8 +126,8 @@ plutil -insert LSMinimumSystemVersion -string "13.0" "${INFO_PLIST}"
 plutil -insert LSUIElement -bool true "${INFO_PLIST}"
 plutil -insert NSHighResolutionCapable -bool true "${INFO_PLIST}"
 plutil -insert NSPrincipalClass -string "NSApplication" "${INFO_PLIST}"
-plutil -insert NSAppleEventsUsageDescription -string "AI Shortcuts asks Finder for the selected file or folder so it can copy the complete POSIX path." "${INFO_PLIST}"
-plutil -insert NSScreenCaptureUsageDescription -string "AI Shortcuts captures only the screen region you select for AI OCR." "${INFO_PLIST}"
+plutil -insert NSAppleEventsUsageDescription -string "AI Shortcuts opens or resumes ChatGPT voice in Chrome and asks Finder for the selected file or folder to copy its complete POSIX path." "${INFO_PLIST}"
+plutil -insert NSScreenCaptureUsageDescription -string "AI Shortcuts captures only the screen region you select for OCR or dictionary lookup." "${INFO_PLIST}"
 
 codesign --force --deep --sign - --identifier "${BUNDLE_ID}" "${APP_PATH}"
 "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" \

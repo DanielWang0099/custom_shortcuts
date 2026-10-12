@@ -1,7 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
-  <title id="title">AI Shortcuts</title>
-  <rect x="40" y="40" width="944" height="944" rx="225" fill="#1b1c20" stroke="#8074fb" stroke-opacity=".48" stroke-width="12"/>
-  <path d="M225 430c102-108 214-108 337 0 77 67 113 63 238-30" fill="none" stroke="#8074fb" stroke-width="88" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M225 594c102 108 214 108 337 0 77-67 113-63 238 30" fill="none" stroke="#b0a7ff" stroke-width="88" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M796 194l18 56 56 18-56 18-18 56-18-56-56-18 56-18z" fill="#fff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" role="img" aria-labelledby="title">
+  <title id="title">AI Shortcuts — lightning arrow</title>
+  <rect x="50.16" y="50.16" width="1153.68" height="1153.68" rx="275.88" fill="#1b1c20"/>
+  <g fill="#8074fb">
+    <path d="M634 345L977 264Q985 262 982 271L870 557Q868 563 865 557L830 490Q826 483 821 489L713 616Q709 622 716 622L866 622Q875 622 870 631L464 1000Q457 1006 457 997L624 721Q627 715 620 716L437 733Q425 734 431 723L739 409Q743 403 736 399L633 351Q624 347 634 345Z"/>
+    <path d="M382 435L642 396Q659 392 668 404Q673 411 667 418L655 431L390 478Q369 483 365 466Q359 447 382 435Z"/>
+    <path d="M293 525L570 474Q585 471 592 481Q599 488 592 497L581 510L303 561Q281 567 275 550Q267 533 293 525Z"/>
+  </g>
 </svg>

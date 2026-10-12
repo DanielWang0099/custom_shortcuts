@@ -13,7 +13,12 @@ final class AppStateStore {
         static let openAIModel = "openAIModel.v1"
         static let anthropicEndpoint = "anthropicEndpoint.v1"
         static let anthropicModel = "anthropicModel.v1"
+        static let dictionaryTargetLanguage = "dictionaryTargetLanguage.v1"
+        static let dictionaryPresentationMode = "dictionaryPresentationMode.v1"
     }
+
+    private static let defaultDictionaryTargetLanguage = "en"
+    private static let dictionaryTargetLanguages: Set<String> = ["en", "es", "zh", "zh-hant", "ja"]
 
     private let defaults: UserDefaults
 
@@ -24,6 +29,42 @@ final class AppStateStore {
     var welcomeDismissed: Bool {
         get { defaults.bool(forKey: Key.welcomeDismissed) }
         set { defaults.set(newValue, forKey: Key.welcomeDismissed) }
+    }
+
+    /// The language used for dictionary definitions and optional sentence
+    /// translation. Store the panel's stable raw value rather than a display
+    /// name so the preference remains portable across localized interfaces.
+    var dictionaryTargetLanguage: String {
+        get {
+            let stored = defaults.string(forKey: Key.dictionaryTargetLanguage)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard let stored,
+                  Self.dictionaryTargetLanguages.contains(stored)
+            else {
+                return Self.defaultDictionaryTargetLanguage
+            }
+            return stored
+        }
+        set {
+            let normalized = newValue
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            defaults.set(
+                Self.dictionaryTargetLanguages.contains(normalized)
+                    ? normalized
+                    : Self.defaultDictionaryTargetLanguage,
+                forKey: Key.dictionaryTargetLanguage
+            )
+        }
+    }
+
+    var dictionaryPresentationMode: DictionaryPresentationMode {
+        get {
+            DictionaryPresentationMode(rawValue: defaults.string(forKey: Key.dictionaryPresentationMode) ?? "")
+                ?? .dictionary
+        }
+        set { defaults.set(newValue.rawValue, forKey: Key.dictionaryPresentationMode) }
     }
 
     var permissionsRequested: Bool {

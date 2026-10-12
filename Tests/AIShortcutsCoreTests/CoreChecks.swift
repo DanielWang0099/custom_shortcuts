@@ -25,9 +25,16 @@ private func require<T>(_ value: T?, _ message: String) throws -> T {
 @main
 struct CoreChecks {
     static func main() async {
+        if CommandLine.arguments.dropFirst().first == "--unicode-locale-fixture" {
+            let failures = await run(
+                "isolated Unicode subprocess locale fixture",
+                unicodeSubprocessLocaleFixtureCheck
+            )
+            exit(failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE)
+        }
+
         var failures = 0
 
-        failures += await run("key source parsing", keySourceParsing)
         failures += await run("AI output contracts", outputContractChecks)
         failures += await run("Markdown math escape repair", markdownMathEscapeRepairChecks)
         failures += await run("math syntax contracts", mathSyntaxChecks)
@@ -37,10 +44,14 @@ struct CoreChecks {
         failures += await run("calculate result presentation", calculateResultPresentationChecks)
         failures += await run("calculate result dismissal", calculateResultDismissalChecks)
         failures += await run("explanation conversation memory", explanationMemoryChecks)
+        failures += await run("Chrome voice session policy", chromeVoiceSessionChecks)
         failures += await run("sequential clipboard FIFO", sequentialClipboardChecks)
         failures += await run("sequential clipboard cross-window capture", sequentialClipboardCaptureChecks)
         failures += await run("sequential clipboard single press", sequentialClipboardSinglePressChecks)
         failures += await run("Insert matching and privacy", insertMatchingChecks)
+        failures += await run("dictionary data, cache, and AI contracts", dictionaryChecks)
+        failures += await run("Chinese script policy", chineseScriptChecks)
+        failures += await run("dictionary history storage", dictionaryHistoryChecks)
         failures += await run("Responses request contract", requestContractCheck)
         failures += await run("configurable provider requests", configurableProviderRequestCheck)
         failures += await run(
@@ -48,6 +59,10 @@ struct CoreChecks {
             emptyProviderFallbackCheck
         )
         failures += await run("bounded subprocess output", boundedSubprocessOutputCheck)
+        failures += await run(
+            "Unicode subprocess locale and clipboard text",
+            unicodeSubprocessLocaleCheck
+        )
         failures += await run("transport residency lifecycle", transportLifecycleCheck)
         failures += await run("mocked Responses success", mockedSuccessCheck)
         failures += await run("mocked Responses errors", mockedErrorChecks)
@@ -74,32 +89,59 @@ struct CoreChecks {
         }
     }
 
-    private static func keySourceParsing() async throws {
-        let source = """
-        OTHER_KEY=ignore-me
-        OPENAI_USAGE_MODEL=gpt-example
-        OPENAI_API_KEY='test-secret-value'
-        """
-        let parsed = try KeySourceParser.parseOpenAIKey(from: source)
-        try expect(
-            parsed == "test-secret-value",
-            "Did not parse the exact OPENAI_API_KEY assignment."
-        )
-        let exported = try KeySourceParser.parseOpenAIKey(
-            from: #"export OPENAI_API_KEY = "test-value""#
-        )
-        try expect(
-            exported == "test-value",
-            "Did not parse export/double-quoted syntax."
-        )
-        do {
-            _ = try KeySourceParser.parseOpenAIKey(
-                from: "OPENAI_MODEL=gpt-5.4-2026-03-05"
-            )
-            throw CheckFailure(description: "Missing key did not fail closed.")
-        } catch KeySourceError.missingKey {
-            // Expected.
+    private static func chineseScriptChecks() async throws {
+        for alias in ["ch", "ch, formal", "Chinese", "中文", "zh"] {
+            try expect(ChineseScript.instruction(alias)?.script == .simplified,
+                       "Bare Chinese alias must use Simplified: \(alias)")
         }
+        for alias in ["Traditional Chinese", "zh-Hant", "zh-TW", "zh-HK", "ch, traditional"] {
+            try expect(ChineseScript.instruction(alias)?.script == .traditional,
+                       "Explicit Traditional alias ignored: \(alias)")
+        }
+        try expect(ChineseScript.instruction("Japanese, formal") == nil,
+                   "Japanese instruction was classified as Chinese")
+        let client = AIProviderClient(transport: MockTransport { _ in throw URLError(.badServerResponse) })
+        for provider in [AIProvider.openAICompatible, .anthropic] {
+            let config = AIProviderConfiguration.defaultConfiguration(for: provider)
+            for (target, marker) in [("ch, formal", "Simplified Chinese (zh-Hans)"),
+                                     ("Traditional Chinese", "Traditional Chinese (zh-Hant)")] {
+                let prompt = PromptBuilder.make(action: .translate, selectedText: "Unable", parameter: target)
+                let request = try client.makeRequest(
+                    prompt: prompt, apiKey: "fixture-key", safetyIdentifier: "fixture-id",
+                    configuration: config
+                )
+                let body = try require(
+                    JSONSerialization.jsonObject(with: require(request.httpBody, "Missing Translate body")) as? [String: Any],
+                    "Invalid Translate body"
+                )
+                let instructions = provider == .anthropic
+                    ? body["system"] as? String
+                    : (body["messages"] as? [[String: Any]])?.first?["content"] as? String
+                try expect(instructions?.contains(marker) == true && instructions?.contains(target) == true,
+                           "\(provider) Translate prompt lost script or tone")
+            }
+        }
+        try expect(ChineseScript.detect("无法") == .simplified, "Simplified detection failed")
+        try expect(ChineseScript.detect("無法") == .traditional, "Traditional detection failed")
+        try expect(ChineseScript.detect("中文") == .simplified, "Ambiguous Han should default Simplified")
+        try expect(ChineseScript.simplified.convert("無法") == "无法", "Traditional conversion failed")
+        try expect(ChineseScript.traditional.convert("无法") == "無法", "Simplified conversion failed")
+        let markdown = "无法 `无法` [无法](https://example.com/无法) [無法](https://example.com/x)\n```swift\nlet s = \"无法\"\n```"
+        let converted = ChineseScript.traditional.convertProse(markdown)
+        try expect(converted.contains("無法 `无法` [無法](https://example.com/无法)"),
+                   "Markdown prose/link label conversion failed")
+        try expect(converted.contains("```swift\nlet s = \"无法\"\n```"),
+                   "Code fence changed during script conversion")
+        let complex = "无法 ``a ` 无法``\n~~~\n无法\n~~~\n无法"
+        let complexConverted = ChineseScript.traditional.convertProse(complex)
+        try expect(complexConverted == "無法 ``a ` 无法``\n~~~\n无法\n~~~\n無法",
+                   "Variable inline code or tilde fence conversion failed")
+        try expect(ChineseScript.traditional.convertProse("无法 [链接][ref]\n[ref]: https://example.com/无法") ==
+                   "無法 [鏈接][ref]\n[ref]: https://example.com/无法",
+                   "Reference link destination changed during conversion")
+        try expect(ChineseScript.simplified.convertProse("無法 `無法` [無法](https://example.com/無法)") ==
+                   "无法 `無法` [无法](https://example.com/無法)",
+                   "Simplified conversion changed protected literals")
     }
 
     private static func outputContractChecks() async throws {
@@ -525,6 +567,8 @@ struct CoreChecks {
                 .init(action: .inputLock, virtualKeyCode: 37),
                 .init(action: .clipboardQueue, virtualKeyCode: 8),
                 .init(action: .insert, virtualKeyCode: 34),
+                .init(action: .chatgptVoice, virtualKeyCode: 44),
+                .init(action: .dictionary, virtualKeyCode: 2),
             ],
             "Global shortcut mappings changed."
         )
@@ -572,14 +616,42 @@ struct CoreChecks {
                         && $0 != .inputLock
                         && $0 != .clipboardQueue
                         && $0 != .insert
+                        && $0 != .chatgptVoice
+                        && $0 != .dictionary
                 }
                 .allSatisfy(\.requiresOpenAI)
                 && !AIShortcutAction.finderPath.requiresOpenAI
                 && !AIShortcutAction.inputLock.requiresOpenAI
                 && !AIShortcutAction.clipboardQueue.requiresOpenAI
                 && !AIShortcutAction.insert.requiresOpenAI
+                && !AIShortcutAction.chatgptVoice.requiresOpenAI
+                && !AIShortcutAction.dictionary.requiresOpenAI
+                && !AIShortcutAction.dictionary.requiresAccessibility
+                && !AIShortcutAction.dictionary.requiresScreenRecording
                 && AIShortcutAction.insert.requiresAccessibility,
             "Local and hybrid shortcuts lost their permission/API contract."
+        )
+        try expect(
+            AIShortcutAction.chatgptVoice.rawValue == 11
+                && AIShortcutAction.chatgptVoice.displayName == "ChatGPT Voice"
+                && AIShortcutAction.chatgptVoice.requiresAccessibility
+                && !AIShortcutAction.chatgptVoice.requiresAIProvider
+                && !AIShortcutAction.chatgptVoice.requiresScreenRecording
+                && !SelectionReplacementPolicy.shouldAttemptReplacement(for: .chatgptVoice),
+            "ChatGPT Voice must retain its stable ID and Accessibility-only local action contract."
+        )
+        try expect(
+            Set(HotKeyDefinition.defaults.map(\.action)) == Set(AIShortcutAction.allCases)
+                && Set(HotKeyDefinition.defaults.map(\.virtualKeyCode)).count
+                    == HotKeyDefinition.defaults.count,
+            "Each action must have exactly one distinct default key."
+        )
+        let voice = PromptBuilder.make(action: .chatgptVoice)
+        try expect(
+            voice.instructions.isEmpty && voice.inputText.isEmpty
+                && voice.maxOutputTokens == 0 && voice.outputSchema == nil
+                && voice.allowedOutputFormats.isEmpty,
+            "ChatGPT Voice must not build an AI prompt."
         )
 
         let refine = PromptBuilder.make(
@@ -1737,6 +1809,138 @@ struct CoreChecks {
                 value == "main-actor-\(index)",
                 "A completed clipboard helper must not stall the main actor."
             )
+        }
+    }
+
+    private static func unicodeSubprocessLocaleCheck() async throws {
+        let parentEnvironment = ProcessInfo.processInfo.environment
+        let parentLocale = environmentValue("LC_ALL")
+        let parentMarker = environmentValue("AI_SHORTCUTS_UNICODE_TEST_MARKER")
+
+        let executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = ["--unicode-locale-fixture"]
+        var fixtureEnvironment = parentEnvironment
+        fixtureEnvironment["LC_ALL"] = "C"
+        fixtureEnvironment["AI_SHORTCUTS_UNICODE_TEST_MARKER"] = "fixture-marker"
+        process.environment = fixtureEnvironment
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        do {
+            try process.run()
+        } catch {
+            throw CheckFailure(
+                description: "Could not start the isolated C-locale fixture: \(error)."
+            )
+        }
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        let fixtureOutput = String(decoding: output, as: UTF8.self)
+        let fixtureError = String(decoding: errorOutput, as: UTF8.self)
+        try expect(
+            process.terminationStatus == 0,
+            "The isolated C-locale fixture failed. stdout: \(fixtureOutput) stderr: \(fixtureError)"
+        )
+        try expect(
+            ProcessInfo.processInfo.environment == parentEnvironment
+                && environmentValue("LC_ALL") == parentLocale
+                && environmentValue("AI_SHORTCUTS_UNICODE_TEST_MARKER") == parentMarker,
+            "The locale fixture changed the test process environment."
+        )
+        try expect(
+            String(data: output, encoding: .utf8)?.contains("PASS isolated Unicode subprocess locale fixture") == true,
+            "The isolated locale fixture did not report its completed checks."
+        )
+    }
+
+    private static func unicodeSubprocessLocaleFixtureCheck() async throws {
+        let initialEnvironment = ProcessInfo.processInfo.environment
+        let initialLocale = environmentValue("LC_ALL")
+        let initialMarker = environmentValue("AI_SHORTCUTS_UNICODE_TEST_MARKER")
+        try expect(
+            initialLocale == "C" && initialMarker == "fixture-marker",
+            "The subprocess locale fixture did not start with its isolated C locale and marker."
+        )
+
+        let localeAndMarkerScript = "locale charmap; printf '%s\\n' \"$AI_SHORTCUTS_UNICODE_TEST_MARKER\""
+        let inheritedOutput = await BoundedProcessOutput.capture(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", localeAndMarkerScript],
+            timeoutNanoseconds: 1_000_000_000
+        )
+        try expect(
+            inheritedOutput.flatMap { String(data: $0, encoding: .utf8) }
+                == "US-ASCII\nfixture-marker\n",
+            "An unoverridden child must inherit the hostile C locale and unrelated marker."
+        )
+
+        let overriddenOutput = await BoundedProcessOutput.capture(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", localeAndMarkerScript],
+            timeoutNanoseconds: 1_000_000_000,
+            environmentOverrides: ["LC_ALL": "en_US.UTF-8"]
+        )
+        try expect(
+            overriddenOutput.flatMap { String(data: $0, encoding: .utf8) }
+                == "UTF-8\nfixture-marker\n",
+            "A UTF-8 override must change the child locale while preserving inherited variables."
+        )
+
+        let unicodeText = [
+            "Simplified Chinese: 筛选，汉字。",
+            "Traditional Chinese: 篩選與詞彙。",
+            "Japanese: 選択と日本語。",
+            "Spanish: ¿Qué tal? acción, pingüino, café.",
+            "Combining: cafe\u{301} | A\u{30A} | n\u{303}",
+            "Greek: Ελληνικά | Cyrillic: Привет, мир!",
+            "Emoji: 👩‍💻 🧪 😀",
+            "Newline: first line\nsecond line",
+        ].joined(separator: "\n")
+        let unicodeFixtureURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AIShortcuts-Unicode-\(UUID().uuidString).txt")
+        do {
+            try Data(unicodeText.utf8).write(to: unicodeFixtureURL)
+        } catch {
+            throw CheckFailure(description: "Could not create the Unicode byte fixture: \(error).")
+        }
+        defer {
+            try? FileManager.default.removeItem(at: unicodeFixtureURL)
+        }
+        let unicodeOutput = await BoundedProcessOutput.capture(
+            executableURL: URL(fileURLWithPath: "/bin/cat"),
+            arguments: [unicodeFixtureURL.path],
+            timeoutNanoseconds: 1_000_000_000,
+            environmentOverrides: ["LC_ALL": "en_US.UTF-8"]
+        )
+        let observedUnicode = unicodeOutput.flatMap {
+            String(data: $0, encoding: .utf8)
+        } ?? "<invalid UTF-8>"
+        try expect(
+            unicodeOutput == Data(unicodeText.utf8),
+            "The bounded subprocess changed or lost exact mixed Unicode clipboard text "
+                + "(observed \(unicodeOutput?.count ?? 0) bytes: \(observedUnicode))."
+        )
+
+        try expect(
+            ProcessInfo.processInfo.environment == initialEnvironment
+                && environmentValue("LC_ALL") == initialLocale
+                && environmentValue("AI_SHORTCUTS_UNICODE_TEST_MARKER") == initialMarker,
+            "A subprocess environment override mutated the fixture process environment."
+        )
+    }
+
+    private static func environmentValue(_ name: String) -> String? {
+        name.withCString { key in
+            guard let value = getenv(key) else {
+                return nil
+            }
+            return String(cString: value)
         }
     }
 

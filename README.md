@@ -16,6 +16,8 @@ Native macOS keyboard shortcuts powered by your own AI model.
 | ⌃ ⌥ ⌘ L | Lock input |
 | ⌃ ⌥ ⌘ C | Sequential clipboard (FIFO) |
 | ⌃ ⌥ ⌘ I | Quick insert snippet |
+| ⌃ ⌥ ⌘ / | Start or resume ChatGPT voice in Chrome |
+| ⌃ ⌥ ⌘ D | Dictionary / AI translation (Tab to switch) |
 
 ## Install
 

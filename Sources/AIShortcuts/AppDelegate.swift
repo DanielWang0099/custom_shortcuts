@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // same preparation path as a recently used action.
     private var selectionServiceStorage: SelectionService?
     private var screenshotServiceStorage: ScreenshotService?
+    private var dictionaryScreenshotServiceStorage: ScreenshotService?
     private var finderServiceStorage: FinderSelectionService?
     private var hudStorage: HUDController?
     private var richTextRendererStorage: NativeRichTextRenderer?
@@ -30,11 +31,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var insertPanelStorage: InsertPanelController?
     private var insertLibraryStorage: InsertLibraryStore?
     private var shortcutGuideStorage: ShortcutGuideWindowController?
+    private var dictionaryCoordinatorStorage: DictionaryCoordinator?
     private var inputLockIndicatorStorage: InputLockIndicatorController?
     private var clipboardQueueIndicatorStorage: ClipboardQueueIndicatorController?
     private var welcomeWindowStorage: WelcomeWindowController?
     private var inputLockServiceStorage: InputLockService?
     private var clipboardQueueServiceStorage: ClipboardQueueService?
+    private var chromeVoiceServiceStorage: ChromeVoiceSessionService?
 
     private var hotKeyManager: HotKeyManager?
     private var promptPanel: PromptPanelController?
@@ -87,6 +90,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return service
     }
 
+    private var dictionaryScreenshotService: ScreenshotService {
+        if let dictionaryScreenshotServiceStorage {
+            return dictionaryScreenshotServiceStorage
+        }
+        let service = ScreenshotService()
+        dictionaryScreenshotServiceStorage = service
+        return service
+    }
+
     private var finderService: FinderSelectionService {
         if let finderServiceStorage {
             return finderServiceStorage
@@ -94,6 +106,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let service = FinderSelectionService()
         finderServiceStorage = service
         return service
+    }
+
+    private var chromeVoiceService: ChromeVoiceSessionService {
+        if let chromeVoiceServiceStorage {
+            return chromeVoiceServiceStorage
+        }
+        let service = ChromeVoiceSessionService()
+        chromeVoiceServiceStorage = service
+        return service
+    }
+
+    private var dictionaryCoordinator: DictionaryCoordinator {
+        if let dictionaryCoordinatorStorage {
+            return dictionaryCoordinatorStorage
+        }
+        let coordinator = DictionaryCoordinator(
+            stateStore: stateStore,
+            selectionService: selectionService,
+            screenshotService: dictionaryScreenshotService,
+            aiCompletion: makeDictionaryAICompletion(),
+            onOpenPermissionSettings: { [weak self] in
+                self?.openDictionaryPermissionSettings()
+            }
+        )
+        dictionaryCoordinatorStorage = coordinator
+        return coordinator
     }
 
     private var hud: HUDController {
@@ -295,6 +333,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         markRuntimeActivity(preconnect: false, latencyCritical: false)
+        if let coordinator = dictionaryCoordinatorStorage,
+           DictionaryActivationPolicy.shouldSkipOnboarding(
+               consumePanelActivation: coordinator.consumePanelActivation,
+               hasActiveWork: { coordinator.hasActiveWork }
+           )
+        {
+            return
+        }
         continueOnboarding()
     }
 
@@ -303,6 +349,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         latencyActivityEndWorkItem?.cancel()
         networkPreconnectTask?.cancel()
         memoryPressureSource?.cancel()
+        dictionaryCoordinatorStorage?.releaseResources()
+        dictionaryScreenshotServiceStorage = nil
         apiClient.suspendConnection()
         endLatencyActivity()
         hotKeyManager?.invalidate()
@@ -311,6 +359,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         inputLockIndicatorStorage?.dismiss()
         clipboardQueueServiceStorage?.deactivate(notify: false)
         clipboardQueueIndicatorStorage?.dismiss()
+        chromeVoiceServiceStorage?.invalidate()
 
         if !isUserIntentionalQuit && (screenRecordingRequestIssuedThisRun || accessibilityRequestIssuedThisRun) {
             logger.notice("Relaunching AI Shortcuts following privacy permission update.")
@@ -373,6 +422,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = inputLockIndicator
         _ = clipboardQueueService
         _ = clipboardQueueIndicator
+        _ = chromeVoiceService
+        _ = dictionaryCoordinator
         _ = modelSettings
         _ = shortcutGuide
         let milliseconds = Int(Date().timeIntervalSince(start) * 1_000)
@@ -419,6 +470,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             _ = selectionService
             _ = insertLibrary
             _ = insertPanel
+        case .chatgptVoice:
+            _ = chromeVoiceService
+        case .dictionary:
+            _ = dictionaryCoordinator
         }
     }
 
@@ -578,6 +633,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if (clipboardQueueServiceStorage?.mode ?? .inactive) == .inactive {
             clipboardQueueServiceStorage = nil
             clipboardQueueIndicatorStorage = nil
+        }
+        if dictionaryCoordinatorStorage?.hasActiveWork != true {
+            dictionaryCoordinatorStorage?.releaseResources()
+            dictionaryCoordinatorStorage = nil
+            dictionaryScreenshotServiceStorage = nil
         }
         if !isBusy {
             selectionServiceStorage = nil
@@ -749,11 +809,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             stateStore.aiProvider = configuration.provider
             apiKeyLoadAttempted = true
             self.apiKey = selectedAPIKey
+            refreshDictionaryAICompletion()
             suspendNetworkResidency()
             markRuntimeActivity(preconnect: true, latencyCritical: false)
             hud.showSuccess(text: "Model settings saved")
         } catch {
             self.apiKey = nil
+            refreshDictionaryAICompletion()
             hud.showError(error.localizedDescription)
             logger.error("Model settings could not be saved.")
         }
@@ -790,6 +852,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             apiKey = storedKey
+            refreshDictionaryAICompletion()
             apiKeyLoadAttempted = true
             markRuntimeActivity(preconnect: true, latencyCritical: false)
         } catch {
@@ -850,6 +913,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try keychainStore.save(entered, for: provider)
                 apiKey = entered
             }
+            refreshDictionaryAICompletion()
             suspendNetworkResidency()
             markRuntimeActivity(preconnect: true, latencyCritical: false)
             if showFeedback {
@@ -858,6 +922,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return true
         } catch {
             apiKey = nil
+            refreshDictionaryAICompletion()
             if showFeedback {
                 hud.showError(error.localizedDescription)
             }
@@ -920,6 +985,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             preconnect: action.requiresAIProvider,
             latencyCritical: true
         )
+        if action == .dictionary {
+            guard !isBusy || dictionaryCoordinator.isVisible else {
+                hud.showBusy()
+                return
+            }
+            dictionaryCoordinator.toggle()
+            return
+        }
         if action == .insert {
             toggleInsertPanel()
             return
@@ -996,11 +1069,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
                 await self?.runFinderPath()
             }
+        case .chatgptVoice:
+            let generation = operationGeneration
+            activeTask = Task(priority: .userInitiated) { @MainActor [weak self] in
+                await self?.runChatGPTVoice(generation: generation)
+            }
         case .inputLock:
             break
         case .clipboardQueue:
             break
         case .insert:
+            break
+        case .dictionary:
             break
         }
     }
@@ -1028,6 +1108,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 if action == .insert, insertPanelStorage?.isVisible == true {
                     insertPanelStorage?.dismiss()
+                }
+                if action == .chatgptVoice {
+                    chromeVoiceServiceStorage?.invalidate()
+                }
+                if action == .dictionary {
+                    dictionaryCoordinatorStorage?.cancel(dismissPanel: true)
                 }
             }
 
@@ -1326,6 +1412,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func runChatGPTVoice(generation: Int) async {
+        // A cancelled launch can finish after another shortcut has started.
+        // Only this operation may release its own busy state or show feedback.
+        defer {
+            if operationGeneration == generation, currentAction == .chatgptVoice {
+                finishOperation()
+            }
+        }
+        do {
+            let outcome = try await chromeVoiceService.startOrResume()
+            guard !Task.isCancelled,
+                  operationGeneration == generation,
+                  currentAction == .chatgptVoice else {
+                return
+            }
+            let message: String
+            switch outcome {
+            case .startedNew:
+                message = "ChatGPT voice started · new chat"
+            case .resumed:
+                message = "ChatGPT voice resumed"
+            case .alreadyActive:
+                message = "ChatGPT voice is already active"
+            }
+            hud.showSuccess(text: message)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled,
+                  operationGeneration == generation,
+                  currentAction == .chatgptVoice else {
+                return
+            }
+            if let voiceError = error as? ChromeVoiceError,
+               case .automationDenied = voiceError {
+                requestAutomationPermission(openSettings: true)
+                hud.showError("Chrome access is off · Privacy & Security → Automation")
+            } else {
+                hud.showError(error.localizedDescription)
+            }
+        }
+    }
+
     private func runFinderPath() async {
         defer { finishOperation() }
         let authorization = await finderService.authorizationState(requestIfNeeded: true)
@@ -1411,6 +1540,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func requestAutomationPermission(openSettings: Bool) {
         if openSettings {
             NSWorkspace.shared.open(AppConfiguration.automationSettingsURL)
+        }
+    }
+
+    private func openDictionaryPermissionSettings() {
+        if !AXIsProcessTrusted() {
+            NSWorkspace.shared.open(AppConfiguration.accessibilitySettingsURL)
+        } else if !CGPreflightScreenCaptureAccess() {
+            NSWorkspace.shared.open(AppConfiguration.screenRecordingSettingsURL)
+        } else {
+            NSWorkspace.shared.open(AppConfiguration.screenRecordingSettingsURL)
         }
     }
 
@@ -1504,12 +1643,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard !completion.output.isEmpty else {
                 throw ResponsesAPIError.missingOutput
             }
+            let boundaryMatched = SelectionOutputPolicy.matchSelectionBoundary(
+                originalSelection: snapshot.text,
+                output: completion.output.source
+            )
+            let targetScript = action == .translate
+                ? ChineseScript.instruction(parameter ?? "")?.script : nil
+            let deliveredSource = targetScript?.convertProse(boundaryMatched) ?? boundaryMatched
             let boundaryMatchedOutput = AIOutputDocument(
                 format: completion.output.format,
-                source: SelectionOutputPolicy.matchSelectionBoundary(
-                    originalSelection: snapshot.text,
-                    output: completion.output.source
-                ),
+                source: deliveredSource,
                 preserveTrailingLineBreaks: true
             )
             let rendered = richTextRenderer.render(boundaryMatchedOutput)
@@ -1728,6 +1871,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             throw error
         }
+    }
+
+    private func completeDictionary(
+        _ request: DictionaryAIRequest
+    ) async throws -> DictionaryAIResponse {
+        guard let apiKey else {
+            throw KeySourceError.missingKey
+        }
+        let configuration = stateStore.aiProviderConfiguration(for: stateStore.aiProvider)
+        do {
+            let response = try await apiClient.completeDictionary(
+                request: request,
+                apiKey: apiKey,
+                safetyIdentifier: cachedSafetyIdentifier,
+                configuration: configuration
+            )
+            lastAPIStatus = "Success"
+            return response
+        } catch {
+            lastAPIStatus = "Error"
+            throw error
+        }
+    }
+
+    /// Dictionary's native/API lookup remains usable without an AI key. Keep
+    /// the optional completion absent until a key is loaded so a successful
+    /// basic lookup does not manufacture a missing-key error for enrichment.
+    private func makeDictionaryAICompletion() -> DictionaryCoordinator.AICompletion? {
+        guard apiKey != nil else {
+            return nil
+        }
+        return { [weak self] request in
+            guard let self else {
+                throw KeySourceError.missingKey
+            }
+            return try await self.completeDictionary(request)
+        }
+    }
+
+    private func refreshDictionaryAICompletion() {
+        dictionaryCoordinatorStorage?.setAICompletion(makeDictionaryAICompletion())
     }
 
     private func handleOperationError(_ error: Error, action: AIShortcutAction) {

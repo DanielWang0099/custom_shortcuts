@@ -13,15 +13,6 @@ public enum AIProvider: String, CaseIterable, Codable, Equatable, Hashable, Send
         }
     }
 
-    public var requestDescription: String {
-        switch self {
-        case .openAICompatible:
-            "Chat Completions request"
-        case .anthropic:
-            "Messages request"
-        }
-    }
-
     public var defaultEndpoint: URL {
         switch self {
         case .openAICompatible:

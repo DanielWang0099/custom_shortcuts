@@ -11,6 +11,8 @@ public enum AIShortcutAction: UInt32, CaseIterable, Sendable {
     case inputLock = 8
     case clipboardQueue = 9
     case insert = 10
+    case chatgptVoice = 11
+    case dictionary = 12
 
     public var displayName: String {
         switch self {
@@ -24,6 +26,8 @@ public enum AIShortcutAction: UInt32, CaseIterable, Sendable {
         case .inputLock: "Input Lock"
         case .clipboardQueue: "Clipboard Queue"
         case .insert: "Insert"
+        case .chatgptVoice: "ChatGPT Voice"
+        case .dictionary: "Dictionary"
         }
     }
 
@@ -32,6 +36,7 @@ public enum AIShortcutAction: UInt32, CaseIterable, Sendable {
             || self == .inputLock
             || self == .clipboardQueue
             || self == .insert
+            || self == .chatgptVoice
     }
 
     public var requiresScreenRecording: Bool {
@@ -48,7 +53,7 @@ public enum AIShortcutAction: UInt32, CaseIterable, Sendable {
 
     public var requiresAIProvider: Bool {
         self != .finderPath && self != .inputLock && self != .clipboardQueue
-            && self != .insert
+            && self != .insert && self != .chatgptVoice && self != .dictionary
     }
 }
 
@@ -61,7 +66,7 @@ public struct HotKeyDefinition: Equatable, Sendable {
         self.virtualKeyCode = virtualKeyCode
     }
 
-    // ANSI keyboard virtual key codes: 4, R, T, F, \, E, =, L, C, I.
+    // ANSI keyboard virtual key codes: 4, R, T, F, \, E, =, L, C, I, /, D.
     public static let defaults: [HotKeyDefinition] = [
         .init(action: .ocr, virtualKeyCode: 21),
         .init(action: .refine, virtualKeyCode: 15),
@@ -73,6 +78,8 @@ public struct HotKeyDefinition: Equatable, Sendable {
         .init(action: .inputLock, virtualKeyCode: 37),
         .init(action: .clipboardQueue, virtualKeyCode: 8),
         .init(action: .insert, virtualKeyCode: 34),
+        .init(action: .chatgptVoice, virtualKeyCode: 44),
+        .init(action: .dictionary, virtualKeyCode: 2),
     ]
 }
 
@@ -191,6 +198,7 @@ public enum PromptBuilder {
             )
         case .translate:
             let target = parameter?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let targetInstruction = ChineseScript.instruction(target)?.prompt ?? target
             let allowedFormats = AIOutputPolicy.allowedFormats(
                 for: .translate,
                 selectedText: selectedText
@@ -198,7 +206,7 @@ public enum PromptBuilder {
             return PromptSpec(
                 action: .translate,
                 instructions: """
-                Translate the supplied text according to this target-language instruction: \(target). Preserve the \
+                Translate the supplied text according to this target-language instruction: \(targetInstruction). Preserve the \
                 meaning, factual content, tone, paragraph structure, and useful formatting. Do not explain the \
                 translation or add commentary. Return only the translated text in the JSON content field, preserving \
                 the selected text's formatting mode. \
@@ -330,6 +338,22 @@ public enum PromptBuilder {
         case .insert:
             return PromptSpec(
                 action: .insert,
+                instructions: "",
+                inputText: "",
+                maxOutputTokens: 0
+            )
+        case .chatgptVoice:
+            return PromptSpec(
+                action: .chatgptVoice,
+                instructions: "",
+                inputText: "",
+                maxOutputTokens: 0
+            )
+        case .dictionary:
+            // Dictionary lookup is orchestrated by native services and its
+            // dedicated provider client rather than the generic completion API.
+            return PromptSpec(
+                action: .dictionary,
                 instructions: "",
                 inputText: "",
                 maxOutputTokens: 0

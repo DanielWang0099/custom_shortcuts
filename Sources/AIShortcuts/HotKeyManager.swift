@@ -3,6 +3,37 @@ import AIShortcutsCore
 import Carbon
 import Foundation
 
+/// The dictionary action can begin capture as soon as its Carbon press arrives,
+/// which protects the first activation if the release event is delayed or
+/// missing. The other actions intentionally remain release-dispatched so their
+/// existing selection and clipboard ordering is unchanged.
+struct HotKeyDispatchState {
+    private(set) var dictionaryKeyIsDown = false
+
+    mutating func pressed(_ action: AIShortcutAction) -> (prepare: Bool, dispatch: Bool) {
+        guard action == .dictionary else {
+            return (true, false)
+        }
+        guard !dictionaryKeyIsDown else {
+            return (false, false)
+        }
+        dictionaryKeyIsDown = true
+        return (true, true)
+    }
+
+    mutating func released(_ action: AIShortcutAction) -> Bool {
+        guard action == .dictionary else {
+            return true
+        }
+        dictionaryKeyIsDown = false
+        return false
+    }
+
+    mutating func reset() {
+        dictionaryKeyIsDown = false
+    }
+}
+
 @MainActor
 final class HotKeyManager {
     private static let signature: OSType = 0x4149_5348 // "AISH"
@@ -14,6 +45,7 @@ final class HotKeyManager {
     private let preparationHandler: @MainActor (AIShortcutAction) -> Void
     private let handler: @MainActor (AIShortcutAction) -> Void
     private var activationChordIsDown = false
+    private var dispatchState = HotKeyDispatchState()
 
     init(
         enabledActions: Set<AIShortcutAction>,
@@ -62,8 +94,8 @@ final class HotKeyManager {
 
         // Carbon remains the action dispatcher. This flags-only monitor gives
         // the shared modifier chord a documented system-wide wake signal while
-        // the accessory app is in the background. The action key-down path is
-        // still the fallback when Accessibility has not yet been granted.
+        // the accessory app is in the background; dictionary's key-down path
+        // does not depend on Accessibility permission.
         modifierMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) {
             [weak self] event in
             let required: NSEvent.ModifierFlags = [.command, .option, .control]
@@ -92,6 +124,9 @@ final class HotKeyManager {
                 hotKeyRefs[action] = reference
                 throw HotKeyError.registrationFailed(status)
             }
+            if action == .dictionary {
+                dispatchState.reset()
+            }
         }
     }
 
@@ -116,12 +151,20 @@ final class HotKeyManager {
         hotKeyRefs[definition.action] = reference
     }
 
-    private func dispatch(_ action: AIShortcutAction) {
-        handler(action)
+    private func handlePressed(_ action: AIShortcutAction) {
+        let events = dispatchState.pressed(action)
+        if events.prepare {
+            preparationHandler(action)
+        }
+        if events.dispatch {
+            handler(action)
+        }
     }
 
-    private func prepare(_ action: AIShortcutAction) {
-        preparationHandler(action)
+    private func handleReleased(_ action: AIShortcutAction) {
+        if dispatchState.released(action) {
+            handler(action)
+        }
     }
 
     private func updateActivationChord(modifiers: UInt32) {
@@ -130,6 +173,11 @@ final class HotKeyManager {
     }
 
     private func updateActivationChord(isDown: Bool) {
+        if !isDown {
+            // Reset on every observed chord-up, even if the monitor missed
+            // the matching chord-down transition.
+            dispatchState.reset()
+        }
         guard isDown != activationChordIsDown else {
             return
         }
@@ -140,6 +188,7 @@ final class HotKeyManager {
     }
 
     private func tearDown() {
+        dispatchState.reset()
         if let modifierMonitor {
             NSEvent.removeMonitor(modifierMonitor)
             self.modifierMonitor = nil
@@ -200,15 +249,15 @@ final class HotKeyManager {
 
         if kind == UInt32(kEventHotKeyPressed) {
             Task(priority: .high) { @MainActor in
-                manager.prepare(action)
+                manager.handlePressed(action)
             }
             return noErr
         }
         if kind == UInt32(kEventHotKeyReleased) {
-            // Dispatch after the action key is released. SelectionService posts
-            // Copy through an isolated event source to avoid the held modifiers.
+            // Preserve release dispatch for every existing shortcut. Dictionary
+            // already ran on press; its release only clears the press gate.
             Task(priority: .high) { @MainActor in
-                manager.dispatch(action)
+                manager.handleReleased(action)
             }
             return noErr
         }
