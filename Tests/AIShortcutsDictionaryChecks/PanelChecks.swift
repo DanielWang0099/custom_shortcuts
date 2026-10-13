@@ -446,6 +446,7 @@ func dictionaryPanelEditingChecks() async throws {
 @MainActor
 func dictionaryPanelLayoutChecks() throws {
     try dictionaryDefaultVisibilityChecks()
+    try dictionaryPanelSingleTermChecks()
     let panel = DictionaryPanelController(presentationMode: .offscreenTest)
     panel.show(state: .empty, onSubmit: { _ in })
     let window = try dictionaryFixtureWindow()
@@ -742,6 +743,79 @@ func dictionaryPanelLayoutChecks() throws {
 
     try dictionaryRedesignChecks(panel: panel, window: window)
     print("PASS dictionary compact/result header, sizing, errors, and lookup alignment")
+}
+
+/// A late compound segmentation removes duplicate context from the body,
+/// including when the independent lookup editor is revealed on hover.
+@MainActor
+private func dictionaryPanelSingleTermChecks() throws {
+    let source = "入站规则"
+    let translation = "Entry rules"
+    let split = [
+        DictionaryPanelToken(text: "入站", utf16Range: NSRange(location: 0, length: 2), sourceLanguage: .chinese),
+        DictionaryPanelToken(text: "规则", utf16Range: NSRange(location: 2, length: 2), sourceLanguage: .chinese),
+    ]
+    let whole = [DictionaryPanelToken(text: source, utf16Range: NSRange(location: 0, length: 4), sourceLanguage: .chinese)]
+    let word = DictionaryPanelWord(originalText: source, headword: source,
+        reading: "rù zhàn guī zé", isAIReading: true,
+        meanings: [.init(definition: "inbound rules", isAIAddition: true)],
+        examples: [.init(source: "请先配置防火墙的入站规则。", translation: "Please configure the firewall's inbound rules first.", language: .chinese)])
+    let panel = DictionaryPanelController(presentationMode: .offscreenTest)
+    defer { panel.releaseResources() }
+    var spoken: [DictionarySpeechRequest] = []
+    func state(tokens: [DictionaryPanelToken], confirmed: Bool = true,
+               loading: Bool = false, error: String? = nil) -> DictionaryPanelViewState {
+        .init(query: source, sourceLanguage: .chinese, mode: .sentence,
+              isLoading: loading, errorMessage: error, word: loading ? nil : word,
+              sentence: .init(source: source, translation: translation, tokens: tokens,
+                              isSegmentationConfirmed: confirmed))
+    }
+    panel.show(state: state(tokens: split), onSubmit: { _ in }, onSpeak: { spoken.append($0) })
+    let window = try dictionaryFixtureWindow()
+    guard let content = window.contentView else { return }
+    func hasSource() -> Bool {
+        panelDescendants(content).contains { ($0 as? NSTextView)?.accessibilityLabel() == "Sentence source" }
+    }
+    func requireDirectEntry(_ name: String) throws {
+        try requirePanel(!hasSource()
+            && !panelDescendants(content).contains { $0.accessibilityLabel()?.hasPrefix("Sentence translation:") == true }
+            && panelControl(content, identifier: "dictionary.sentence.disclosure") == nil,
+            "\(name): a single term still displays sentence context")
+        guard let heading = panelDescendants(content).first(where: { $0.accessibilityLabel() == "Headword \(source)" }),
+              let document = heading.enclosingScrollView?.documentView else {
+            throw DictionaryPanelCheckFailure(description: "\(name): direct entry heading is missing")
+        }
+        try requirePanel(abs(heading.convert(.zero, to: document).y - 4) <= 0.5,
+                         "\(name): removed context left an empty space above the entry")
+    }
+    try requirePanel(hasSource(), "Multi-term segmentation lost selectable sentence context")
+    panel.update(state: state(tokens: whole, confirmed: false))
+    try requirePanel(hasSource(), "Unconfirmed compact CJK input was mistaken for one dictionary term")
+    panel.update(state: state(tokens: whole))
+    try requireDirectEntry("Confirmed compound")
+    try savePanelPreview(window, name: "single-term-620", subdirectory: "redesign")
+    panel.setSearchHovered(true)
+    try requireDirectEntry("Hovered compound")
+    try requirePanel(panelControl(content, identifier: "dictionary.lookup")?.isHidden == false,
+                     "Single-term presentation disabled the editable lookup field")
+    guard let speaker = panelDescendants(content).compactMap({ $0 as? NSButton })
+        .first(where: { $0.accessibilityLabel() == "Speak \(source)" }) else {
+        throw DictionaryPanelCheckFailure(description: "Single-term speaker is missing")
+    }
+    try sendPanelAction(speaker, named: "single-term speaker")
+    try requirePanel(spoken.last?.text == source && spoken.last?.language == .chinese,
+                     "Single-term presentation changed the spoken source or language")
+    panel.setSearchHovered(false)
+    panel.update(state: state(tokens: whole, loading: true))
+    try requireDirectEntry("Loading compound")
+    panel.update(state: state(tokens: whole, error: "Dictionary service is unavailable."))
+    try requireDirectEntry("Compound error")
+    panel.update(state: state(tokens: split))
+    try requirePanel(hasSource(), "Revised multi-term segmentation did not restore source context")
+    panel.update(state: .init(query: "入站规则说明", sourceLanguage: .chinese, mode: .sentence, word: word,
+        sentence: .init(source: "入站规则说明", tokens: whole, isSegmentationConfirmed: true)))
+    try requirePanel(hasSource(), "A partial single token hid the rest of the selected source")
+    print("PASS single-term direct entry, confirmation, hover, loading/error, and restored multi-term context")
 }
 
 /// Exercises the body against both native scroller styles at the panel's

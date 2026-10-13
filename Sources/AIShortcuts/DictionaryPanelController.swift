@@ -240,19 +240,40 @@ public struct DictionaryPanelSentence: Equatable {
     public let tokens: [DictionaryPanelToken]
     public let activeTokenIndex: Int
     public let activeRange: NSRange?
+    /// Compact CJK sentences can initially appear as one native token. Only
+    /// confirmed segmentation may suppress their source context as one term.
+    public let isSegmentationConfirmed: Bool
+
+    var isSingleTerm: Bool {
+        let words = tokens.filter { !$0.isWhitespace && !$0.isPunctuation }
+        guard isSegmentationConfirmed, words.count == 1, let word = words.first else { return false }
+        let sourceText = source as NSString
+        let range = word.utf16Range
+        guard range.location != NSNotFound, range.location >= 0, range.length > 0,
+              range.location <= sourceText.length,
+              range.length <= sourceText.length - range.location,
+              sourceText.substring(with: range) == word.text
+        else { return false }
+        let surrounding = sourceText.substring(to: range.location)
+            + sourceText.substring(from: NSMaxRange(range))
+        let separators = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+        return surrounding.unicodeScalars.allSatisfy { separators.contains($0) }
+    }
 
     public init(
         source: String,
         translation: String? = nil,
         tokens: [DictionaryPanelToken] = [],
         activeTokenIndex: Int = 0,
-        activeRange: NSRange? = nil
+        activeRange: NSRange? = nil,
+        isSegmentationConfirmed: Bool = false
     ) {
         self.source = source
         self.translation = translation
         self.tokens = tokens
         self.activeTokenIndex = max(0, min(activeTokenIndex, max(0, tokens.count - 1)))
         self.activeRange = activeRange
+        self.isSegmentationConfirmed = isSegmentationConfirmed
     }
 }
 
@@ -2335,10 +2356,12 @@ public final class DictionaryPanelController: NSObject, NSWindowDelegate, NSText
         if state.presentationMode == .translate {
             y = renderTranslation(at: y, width: width)
         } else if let sentence = state.sentence {
-            y = renderSentence(sentence, at: y, width: width)
+            if !sentence.isSingleTerm {
+                y = renderSentence(sentence, at: y, width: width)
+            }
             let token = sentence.tokens.indices.contains(sentence.activeTokenIndex) ? sentence.tokens[sentence.activeTokenIndex] : nil
             if let word = state.word ?? token.map({ DictionaryPanelWord(originalText: $0.text, headword: $0.headword ?? $0.text) }) {
-                y += DictionaryPanelLayout.sectionGap - 2
+                if !sentence.isSingleTerm { y += DictionaryPanelLayout.sectionGap - 2 }
                 y = renderWord(word, at: y, width: width)
             }
         } else if let word = state.word {

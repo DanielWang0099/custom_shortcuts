@@ -914,6 +914,28 @@ func dictionaryCaptureChecks() async throws {
         cjk.clean()
     }
 
+    // Punctuation makes the initial selection take the sentence path even
+    // when this Mac has a whole-term dictionary entry. AI then confirms one
+    // complete term, which must remove the duplicate source/translation area.
+    let singleTerm = CaptureFixture(selected: "入站规则。", useAI: true,
+        contextSegmentation: [.init(text: "入站规则", sourceRange: NSRange(location: 0, length: 4), language: .chinese)])
+    defer { singleTerm.clean() }
+    try await singleTerm.start()
+    try requireCapture(singleTerm.controls.contains { $0.accessibilityLabel() == "Sentence source" },
+                       "Unconfirmed single-term fixture did not retain its initial context")
+    try await waitUntil {
+        singleTerm.transport.requests.contains { $0.hasSuffix("/zh/入站规则") }
+            && !singleTerm.controls.contains { $0.accessibilityLabel() == "Sentence source" }
+    }
+    singleTerm.panel.setSearchHovered(true)
+    try requireCapture(!singleTerm.controls.contains { $0.accessibilityLabel() == "Sentence source"
+        || $0.accessibilityLabel()?.hasPrefix("Sentence translation:") == true },
+        "Hover restored source/translation context after AI confirmed one term")
+    try requireCapture(singleTerm.lookupField?.isHidden == false,
+                       "AI-confirmed single term disabled lookup editing")
+    singleTerm.clean()
+    print("PASS AI single-term segmentation removes duplicate context, including on hover")
+
     // Automatic mixed-script tokenization must route each token through its
     // own language. The fixture also returns a deliberately weak AI split of
     // 参考; the coordinator must reject it and keep the native compound so

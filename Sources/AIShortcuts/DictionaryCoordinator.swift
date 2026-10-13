@@ -127,6 +127,7 @@ final class DictionaryCoordinator {
     private var currentError: String?
     private var contextError: String?
     private var aiSegmentationApplied = false
+    private var nativeRefinementApplied = false
     private var historyError: String?
     private var lastCaptureNotice: String?
     private var phraseSelectionRange: NSRange?
@@ -401,6 +402,7 @@ final class DictionaryCoordinator {
         currentError = nil
         contextError = nil
         aiSegmentationApplied = false
+        nativeRefinementApplied = false
         historyError = historyStore.storageError?.localizedDescription
         currentAIAdditions.removeAll()
         sentenceTranslation = nil
@@ -1162,6 +1164,7 @@ final class DictionaryCoordinator {
 
         let refinedPanelTokens = refinedTokens.map(DictionaryPanelToken.init(native:))
         guard refinedPanelTokens != sentenceTokens else { return }
+        nativeRefinementApplied = true
         let previousToken = activeToken
         sentenceTokens = refinedPanelTokens
         activeToken = remapCurrentSelection(previousToken, in: refinedPanelTokens)
@@ -1529,6 +1532,7 @@ final class DictionaryCoordinator {
         currentError = nil
         contextError = nil
         aiSegmentationApplied = false
+        nativeRefinementApplied = false
         present(state: makeState(isLoading: true), focusInput: false)
         if mode == .sentence {
             startSentenceContext(generation: generation)
@@ -1585,6 +1589,7 @@ final class DictionaryCoordinator {
         currentError = nil
         contextError = nil
         aiSegmentationApplied = false
+        nativeRefinementApplied = false
         lastCaptureNotice = nil
     }
 
@@ -1647,7 +1652,12 @@ final class DictionaryCoordinator {
                 translation: sentenceTranslation,
                 tokens: sentenceTokens,
                 activeTokenIndex: activeIndex,
-                activeRange: activeToken?.utf16Range
+                activeRange: activeToken?.utf16Range,
+                isSegmentationConfirmed: aiSegmentationApplied || nativeRefinementApplied
+                    || !sentenceTokens.contains { token in
+                        token.isWordToken
+                            && ["zh", "ja"].contains(resolvedSourceLanguage(for: token).canonicalCode)
+                    }
             )
         } else {
             sentence = nil
